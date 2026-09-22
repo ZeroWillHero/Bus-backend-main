@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: slbus
+          POSTGRES_PASSWORD: slbus
+          POSTGRES_DB: slbus
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U slbus"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8.10
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: gofmt check
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        env:
+          DATABASE_URL: postgres://slbus:slbus@localhost:5432/slbus?sslmode=disable
+        run: go test ./... -v -race

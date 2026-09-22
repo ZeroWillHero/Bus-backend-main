@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Audit gate for sl-bus-backend — ENGINEERING_STANDARDS.md §10/§12: no
+# commit lands unless gofmt, go vet, golangci-lint (if installed), the
+# build, and the full test suite all pass. CI (.github/workflows/ci.yml)
+# is the authoritative backstop since this hook can be bypassed with
+# --no-verify.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+FAILED=0
+
+UNFORMATTED="$(gofmt -l .)"
+if [[ -n "$UNFORMATTED" ]]; then
+  echo "FAIL: gofmt found unformatted files:" >&2
+  echo "$UNFORMATTED" >&2
+  FAILED=1
+fi
+
+if ! go vet ./...; then
+  echo "FAIL: go vet" >&2
+  FAILED=1
+fi
+
+if command -v golangci-lint > /dev/null; then
+  if ! golangci-lint run ./...; then
+    echo "FAIL: golangci-lint" >&2
+    FAILED=1
+  fi
+else
+  echo "WARN: golangci-lint not installed locally — CI still enforces this." >&2
+fi
+
+if ! go build ./...; then
+  echo "FAIL: go build" >&2
+  FAILED=1
+fi
+
+if ! go test ./...; then
+  echo "FAIL: go test" >&2
+  FAILED=1
+fi
+
+if [[ "$FAILED" -ne 0 ]]; then
+  echo "" >&2
+  echo "AUDIT FAILED — commit blocked until the above is fixed." >&2
+  exit 1
+fi
+
+echo "All checks passed."
