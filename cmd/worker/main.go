@@ -12,17 +12,23 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"github.com/sl-bus/backend/internal/platform/db"
 )
 
 func main() {
+	_ = godotenv.Load()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	dsn := getenv("DATABASE_URL", "postgres://slbus:slbus@localhost:5432/slbus?sslmode=disable")
+	// Port 5433 matches docker-compose.yml's host mapping for local dev
+	// (5432 is often already taken by another project on a dev machine).
+	dsn := getenv("DATABASE_URL", "postgres://slbus:slbus@localhost:5433/slbus?sslmode=disable")
 	pool, err := db.NewPool(ctx, dsn)
 	if err != nil {
 		logger.Error("failed to connect to database", "error", err)

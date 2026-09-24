@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/sl-bus/backend/internal/platform/httpx"
 )
 
 type ctxKey string
@@ -29,12 +29,12 @@ func Middleware(verifier Verifier) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token, err := bearerToken(r)
 			if err != nil {
-				writeUnauthorized(w)
+				writeUnauthorized(w, err)
 				return
 			}
 			claims, err := verifier.Verify(token)
 			if err != nil {
-				writeUnauthorized(w)
+				writeUnauthorized(w, err)
 				return
 			}
 			ctx := context.WithValue(r.Context(), claimsCtxKey, claims)
@@ -49,6 +49,33 @@ func FromContext(ctx context.Context) (*Claims, bool) {
 	return claims, ok
 }
 
+// RequireRole gates a subroute to a set of roles, per the RBAC matrix in
+// AUTHENTICATION_DESIGN.md §5. Must run after Middleware, which populates
+// the claims this reads.
+func RequireRole(roles ...Role) func(http.Handler) http.Handler {
+	allowed := make(map[Role]struct{}, len(roles))
+	for _, r := range roles {
+		allowed[r] = struct{}{}
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := FromContext(r.Context())
+			if !ok {
+				writeUnauthorized(w, errors.New("auth: missing claims"))
+				return
+			}
+			if _, ok := allowed[claims.Role]; !ok {
+				httpx.WriteError(w, http.StatusForbidden, httpx.APIError{
+					Code:    "AUTH_FORBIDDEN",
+					Message: "You don't have permission to perform this action.",
+				}, nil)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func bearerToken(r *http.Request) (string, error) {
 	header := r.Header.Get("Authorization")
 	const prefix = "Bearer "
@@ -58,10 +85,19 @@ func bearerToken(r *http.Request) (string, error) {
 	return strings.TrimPrefix(header, prefix), nil
 }
 
-func writeUnauthorized(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = w.Write([]byte(`{"success":false,"error":{"code":"AUTH_TOKEN_EXPIRED","message":"Please sign in again."}}`))
+// writeUnauthorized reports the specific reason a token was rejected
+// (expired vs missing/malformed/invalid-signature) rather than always
+// claiming AUTH_TOKEN_EXPIRED, so a client can tell "refresh" apart from
+// "sign in again."
+func writeUnauthorized(w http.ResponseWriter, err error) {
+	code := "AUTH_TOKEN_INVALID"
+	message := "Please sign in again."
+	if errors.Is(err, ErrTokenExpired) {
+		code = "AUTH_TOKEN_EXPIRED"
+		message = "Your session has expired. Please sign in again."
+	}
+	httpx.WriteError(w, http.StatusUnauthorized, httpx.APIError{
+		Code:    code,
+		Message: message,
+	}, nil)
 }
-
-var _ = jwt.SigningMethodHS256 // placeholder until the signing method is finalized with golang-jwt v5 (RFC 8725)
