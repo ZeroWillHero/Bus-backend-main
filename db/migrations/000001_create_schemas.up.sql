@@ -1,4 +1,6 @@
 -- One Postgres schema per bounded context, per DATABASE_DESIGN.md §2.
+-- Plus the platform schema for shared infrastructure (outbox, config, etc).
+CREATE SCHEMA IF NOT EXISTS platform;
 CREATE SCHEMA IF NOT EXISTS identity;
 CREATE SCHEMA IF NOT EXISTS ops;
 CREATE SCHEMA IF NOT EXISTS fleet;

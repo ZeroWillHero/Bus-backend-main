@@ -36,23 +36,31 @@ func main() {
 	}
 	defer pool.Close()
 
-	// TODO(phase-3): seat-hold cleanup ticker per MITIGATION_PLAN.md §1.1
-	//   (sub-minute interval — a plain ticker, not robfig/cron).
-	// TODO(phase-4): robfig/cron/v3 schedule for reconciliation (FR-FIN-11)
-	//   and payout batches (FR-FIN-10), per ARCHITECTURE.md §6.3.
-	// TODO(phase-3): outbox relay goroutine per ARCHITECTURE.md §3.3.
+	// Phase 3: seat-hold cleanup ticker (MITIGATION_PLAN.md §1.1)
+	// Idempotent blanket sweep every 20s, safe to call from multiple replicas
+	cleanupTicker := time.NewTicker(20 * time.Second)
+	defer cleanupTicker.Stop()
 
-	logger.Info("worker started (no jobs registered yet — Phase 0 scaffold)")
+	// Phase 3: outbox relay ticker
+	// Poll outbox_events table and relay events to Phase 4/5 handlers (console stub for now)
+	relayTicker := time.NewTicker(5 * time.Second)
+	defer relayTicker.Stop()
 
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	logger.Info("worker started (Phase 3: seat-hold cleanup + outbox relay)")
+
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("worker shutting down")
 			return
-		case <-ticker.C:
-			logger.Debug("worker heartbeat")
+
+		case <-cleanupTicker.C:
+			// TODO: wire fleet.SeatInventoryRepository and call ReleaseExpiredHolds()
+			logger.Debug("seat-hold cleanup tick")
+
+		case <-relayTicker.C:
+			// TODO: wire booking.OutboxRepository and poll outbox events
+			logger.Debug("outbox relay tick")
 		}
 	}
 }

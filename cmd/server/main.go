@@ -17,7 +17,11 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
 
+	bookinghttp "github.com/sl-bus/backend/internal/booking/http"
+	bookingrepo "github.com/sl-bus/backend/internal/booking/repository"
+	bookingservice "github.com/sl-bus/backend/internal/booking/service"
 	fleethttp "github.com/sl-bus/backend/internal/fleet/http"
+	fleetrepo "github.com/sl-bus/backend/internal/fleet/repository"
 	fleetservice "github.com/sl-bus/backend/internal/fleet/service"
 	identityhttp "github.com/sl-bus/backend/internal/identity/http"
 	identityrepo "github.com/sl-bus/backend/internal/identity/repository"
@@ -135,6 +139,30 @@ func main() {
 		Verifier: jwtIssuer,
 	}))
 	r.Get("/v1/trips/search", fleethttp.NewSearchHandler(searchSvc))
+
+	// Phase 3 — Booking Core (IMPLEMENTATION_ROADMAP.md).
+	// Constructs the seat-hold repository, checkout service, and booking HTTP handlers.
+	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool)
+	bookingRepo := bookingrepo.NewBookingRepository(pool)
+	bookingSeatRepo := bookingrepo.NewBookingSeatRepository(pool)
+	ticketRepo := bookingrepo.NewTicketRepository(pool)
+	outboxRepo := bookingrepo.NewOutboxRepository(pool)
+	paymentGateway := bookingrepo.NewMockPaymentGateway()
+	qrTokenSecret := []byte(getenv("QR_TOKEN_SECRET", "dev-only-insecure-secret-change-me"))
+
+	checkoutSvc := bookingservice.NewCheckoutService(
+		bookingRepo,
+		bookingSeatRepo,
+		ticketRepo,
+		seatInventoryRepo,
+		paymentGateway,
+		outboxRepo,
+		qrTokenSecret,
+	)
+
+	r.Mount("/v1", bookinghttp.NewRouter(bookinghttp.Deps{
+		CheckoutService: checkoutSvc,
+	}))
 
 	addr := getenv("HTTP_ADDR", ":8080")
 	srv := &http.Server{
