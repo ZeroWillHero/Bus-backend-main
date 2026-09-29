@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 
 	bookinghttp "github.com/sl-bus/backend/internal/booking/http"
 	bookingrepo "github.com/sl-bus/backend/internal/booking/repository"
@@ -31,6 +32,7 @@ import (
 	"github.com/sl-bus/backend/internal/platform/auth"
 	"github.com/sl-bus/backend/internal/platform/db"
 	"github.com/sl-bus/backend/internal/platform/httpx"
+	"github.com/sl-bus/backend/internal/platform/wsgw"
 )
 
 func main() {
@@ -142,7 +144,14 @@ func main() {
 
 	// Phase 3 — Booking Core (IMPLEMENTATION_ROADMAP.md).
 	// Constructs the seat-hold repository, checkout service, and booking HTTP handlers.
-	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool)
+	// Also wires the Redis client for live seat-update pub/sub and WebSocket gateway.
+	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
+	redisClient := redis.NewClient(&redis.Options{
+		Addr: redisAddr,
+	})
+	defer redisClient.Close()
+
+	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool, redisClient)
 	bookingRepo := bookingrepo.NewBookingRepository(pool)
 	bookingSeatRepo := bookingrepo.NewBookingSeatRepository(pool)
 	ticketRepo := bookingrepo.NewTicketRepository(pool)
@@ -160,9 +169,15 @@ func main() {
 		qrTokenSecret,
 	)
 
+	// WebSocket gateway for live seat updates
+	wsGateway := wsgw.NewGateway(redisClient, jwtIssuer, logger)
+
 	r.Mount("/v1", bookinghttp.NewRouter(bookinghttp.Deps{
 		CheckoutService: checkoutSvc,
 	}))
+
+	// WebSocket endpoint for live seat status updates
+	r.HandleFunc("GET /v1/ws/trips/{tripID}/seats", wsGateway.HandleSeatsSubscription)
 
 	addr := getenv("HTTP_ADDR", ":8080")
 	srv := &http.Server{

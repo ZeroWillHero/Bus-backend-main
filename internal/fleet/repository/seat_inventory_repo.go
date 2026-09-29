@@ -2,10 +2,12 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // SeatInventoryRepository implements domain.SeatHoldPort, the cross-context
@@ -13,11 +15,12 @@ import (
 // The actual invariant preventing overselling is the DB's UNIQUE(trip_id, seat_number)
 // + optimistic-concurrency version check (DATABASE_DESIGN.md §3).
 type SeatInventoryRepository struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	redis *redis.Client
 }
 
-func NewSeatInventoryRepository(pool *pgxpool.Pool) *SeatInventoryRepository {
-	return &SeatInventoryRepository{pool: pool}
+func NewSeatInventoryRepository(pool *pgxpool.Pool, redis *redis.Client) *SeatInventoryRepository {
+	return &SeatInventoryRepository{pool: pool, redis: redis}
 }
 
 // HoldSeats attempts to hold the requested seat numbers for a booking.
@@ -62,6 +65,9 @@ func (r *SeatInventoryRepository) HoldSeats(ctx context.Context, tripID string, 
 		if err != nil {
 			return 0, fmt.Errorf("update_available_seats: %w", err)
 		}
+
+		// Publish seat update to Redis for live WS clients
+		_ = r.publishSeatUpdate(ctx, tripID, "held", seatNumbers)
 	}
 
 	return heldCount, nil
@@ -82,6 +88,9 @@ func (r *SeatInventoryRepository) ConfirmSeats(ctx context.Context, tripID strin
 	if err != nil {
 		return fmt.Errorf("confirm_seats: %w", err)
 	}
+
+	// Publish seat update to Redis for live WS clients
+	_ = r.publishSeatUpdate(ctx, tripID, "booked", seatNumbers)
 
 	return nil
 }
@@ -114,6 +123,9 @@ func (r *SeatInventoryRepository) ReleaseSeats(ctx context.Context, tripID strin
 		if err != nil {
 			return fmt.Errorf("update_available_seats on release: %w", err)
 		}
+
+		// Publish seat update to Redis for live WS clients
+		_ = r.publishSeatUpdate(ctx, tripID, "available", seatNumbers)
 	}
 
 	return nil
@@ -160,4 +172,27 @@ func (r *SeatInventoryRepository) ReleaseExpiredHolds(ctx context.Context) (rele
 	}
 
 	return releasedCount, nil
+}
+
+// publishSeatUpdate sends a seat-status-changed message to Redis for live WS clients.
+// The message is a JSON object: {"action": "status_changed", "trip_id": "...", "seat_numbers": [...], "new_status": "..."}
+func (r *SeatInventoryRepository) publishSeatUpdate(ctx context.Context, tripID, newStatus string, seatNumbers []string) error {
+	if r.redis == nil {
+		return nil // Redis is optional; silently skip if not configured
+	}
+
+	msg := map[string]interface{}{
+		"action":       "status_changed",
+		"trip_id":      tripID,
+		"seat_numbers": seatNumbers,
+		"new_status":   newStatus,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal seat update: %w", err)
+	}
+
+	channel := fmt.Sprintf("trip:%s", tripID)
+	return r.redis.Publish(ctx, channel, payload).Err()
 }
