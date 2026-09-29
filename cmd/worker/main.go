@@ -15,6 +15,8 @@ import (
 	"github.com/joho/godotenv"
 
 	bookingrepo "github.com/sl-bus/backend/internal/booking/repository"
+	financerepository "github.com/sl-bus/backend/internal/finance/repository"
+	financeservice "github.com/sl-bus/backend/internal/finance/service"
 	fleetrepo "github.com/sl-bus/backend/internal/fleet/repository"
 	"github.com/sl-bus/backend/internal/platform/db"
 )
@@ -38,9 +40,20 @@ func main() {
 	}
 	defer pool.Close()
 
-	// Wire repositories for Phase 3 background tasks
+	// Wire repositories for Phase 3/4 background tasks
 	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool, nil) // Redis not needed for cleanup
 	outboxRepo := bookingrepo.NewOutboxRepository(pool)
+
+	// Phase 4: Wire finance repositories and journal service
+	journalRepo := financerepository.NewJournalRepository(pool)
+	accountRepo := financerepository.NewAccountRepository(pool)
+	operatorLedgerRepo := financerepository.NewOperatorLedgerRepository(pool)
+	periodRepo := financerepository.NewPeriodRepository(pool)
+	outboxAdapter := financerepository.NewOutboxAdapter(outboxRepo)
+
+	journalSvc := financeservice.NewJournalService(
+		journalRepo, accountRepo, operatorLedgerRepo, periodRepo, outboxAdapter, logger,
+	)
 
 	// Phase 3: seat-hold cleanup ticker (MITIGATION_PLAN.md §1.1)
 	// Idempotent blanket sweep every 20s, safe to call from multiple replicas
@@ -69,8 +82,7 @@ func main() {
 			}
 
 		case <-relayTicker.C:
-			// Poll outbox for unprocessed events and relay to Phase 4/5 handlers
-			// For now, this is a console stub (Phase 4/5 will integrate real handlers)
+			// Poll outbox for unprocessed events and relay to Phase 4 (ledger) / Phase 5 (notifications)
 			events, err := outboxRepo.PollUnprocessed(ctx, 10)
 			if err != nil {
 				logger.Error("outbox poll failed", "error", err)
@@ -78,15 +90,46 @@ func main() {
 			}
 
 			for _, event := range events {
-				// Log event for Phase 4/5 to pick up
-				// In real deployment: this would push to a message queue or call handlers
-				logger.InfoContext(ctx, "outbox event relayed",
-					"event_type", event["event_type"],
-					"payload", event["payload"],
-				)
+				eventType, ok := event["event_type"].(string)
+				if !ok {
+					logger.Warn("invalid event_type", "event_id", event["id"])
+					continue
+				}
+
+				eventID := event["id"].(string)
+				payload, ok := event["payload"].(map[string]interface{})
+				if !ok {
+					logger.Warn("invalid payload", "event_id", eventID, "event_type", eventType)
+					continue
+				}
+
+				// Phase 4: Process ledger events
+				var processErr error
+				switch eventType {
+				case "BookingConfirmed":
+					bookingID := payload["booking_id"].(string)
+					processErr = journalSvc.ProcessBookingConfirmed(ctx, bookingID, payload)
+
+				case "BookingCancelled":
+					bookingID := payload["booking_id"].(string)
+					processErr = journalSvc.ProcessBookingCancelled(ctx, bookingID, payload)
+
+				case "PaidButExpired":
+					bookingID := payload["booking_id"].(string)
+					processErr = journalSvc.ProcessPaidButExpired(ctx, bookingID, payload)
+
+				default:
+					// Unknown event type; log but don't error (Phase 5 handlers may catch it)
+					logger.DebugContext(ctx, "unknown event type", "event_type", eventType)
+				}
+
+				if processErr != nil {
+					logger.Error("failed to process outbox event",
+						"event_id", eventID, "event_type", eventType, "error", processErr)
+					continue
+				}
 
 				// Mark as processed
-				eventID := event["id"].(string)
 				if err := outboxRepo.MarkProcessed(ctx, eventID); err != nil {
 					logger.Error("failed to mark event processed", "event_id", eventID, "error", err)
 				}
