@@ -14,6 +14,8 @@ import (
 
 	"github.com/joho/godotenv"
 
+	bookingrepo "github.com/sl-bus/backend/internal/booking/repository"
+	fleetrepo "github.com/sl-bus/backend/internal/fleet/repository"
 	"github.com/sl-bus/backend/internal/platform/db"
 )
 
@@ -36,6 +38,10 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Wire repositories for Phase 3 background tasks
+	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool, nil) // Redis not needed for cleanup
+	outboxRepo := bookingrepo.NewOutboxRepository(pool)
+
 	// Phase 3: seat-hold cleanup ticker (MITIGATION_PLAN.md §1.1)
 	// Idempotent blanket sweep every 20s, safe to call from multiple replicas
 	cleanupTicker := time.NewTicker(20 * time.Second)
@@ -55,12 +61,36 @@ func main() {
 			return
 
 		case <-cleanupTicker.C:
-			// TODO: wire fleet.SeatInventoryRepository and call ReleaseExpiredHolds()
-			logger.Debug("seat-hold cleanup tick")
+			releasedCount, err := seatInventoryRepo.ReleaseExpiredHolds(ctx)
+			if err != nil {
+				logger.Error("seat-hold cleanup failed", "error", err)
+			} else if releasedCount > 0 {
+				logger.Info("seat-hold cleanup swept", "released_count", releasedCount)
+			}
 
 		case <-relayTicker.C:
-			// TODO: wire booking.OutboxRepository and poll outbox events
-			logger.Debug("outbox relay tick")
+			// Poll outbox for unprocessed events and relay to Phase 4/5 handlers
+			// For now, this is a console stub (Phase 4/5 will integrate real handlers)
+			events, err := outboxRepo.PollUnprocessed(ctx, 10)
+			if err != nil {
+				logger.Error("outbox poll failed", "error", err)
+				continue
+			}
+
+			for _, event := range events {
+				// Log event for Phase 4/5 to pick up
+				// In real deployment: this would push to a message queue or call handlers
+				logger.InfoContext(ctx, "outbox event relayed",
+					"event_type", event["event_type"],
+					"payload", event["payload"],
+				)
+
+				// Mark as processed
+				eventID := event["id"].(string)
+				if err := outboxRepo.MarkProcessed(ctx, eventID); err != nil {
+					logger.Error("failed to mark event processed", "event_id", eventID, "error", err)
+				}
+			}
 		}
 	}
 }
