@@ -122,21 +122,21 @@ CREATE POLICY operator_view_own_ledger ON finance.journal_lines
     FOR SELECT
     USING (
         operator_id IS NULL -- Control account lines (no operator_id) visible to all auth
-        OR operator_id = (SELECT id FROM ops.operators WHERE user_id = current_setting('app.current_user_id', true)::uuid)
+        OR operator_id = current_setting('app.current_operator_id', true)::uuid
         OR current_setting('app.current_role', true) = 'platform_admin'
     );
 
 CREATE POLICY operator_view_own_balance ON finance.operator_ledger_balances
     FOR SELECT
     USING (
-        operator_id = (SELECT id FROM ops.operators WHERE user_id = current_setting('app.current_user_id', true)::uuid)
+        operator_id = current_setting('app.current_operator_id', true)::uuid
         OR current_setting('app.current_role', true) = 'platform_admin'
     );
 
 CREATE POLICY operator_view_own_payouts ON finance.payouts
     FOR SELECT
     USING (
-        operator_id = (SELECT id FROM ops.operators WHERE user_id = current_setting('app.current_user_id', true)::uuid)
+        operator_id = current_setting('app.current_operator_id', true)::uuid
         OR current_setting('app.current_role', true) = 'platform_admin'
     );
 
