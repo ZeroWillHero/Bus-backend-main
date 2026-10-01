@@ -1,3 +1,6 @@
+include .env
+export
+
 .PHONY: dev-up dev-down run-server run-worker migrate-up migrate-down lint test
 
 dev-up:
@@ -14,10 +17,10 @@ run-worker:
 
 # Requires: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 migrate-up:
-	migrate -path db/migrations -database "$${DATABASE_URL:-postgres://slbus:slbus@localhost:5433/slbus?sslmode=disable}" up
+	migrate -path db/migrations -database "${DATABASE_URL}" up
 
 migrate-down:
-	migrate -path db/migrations -database "$${DATABASE_URL:-postgres://slbus:slbus@localhost:5433/slbus?sslmode=disable}" down 1
+	migrate -path db/migrations -database "${DATABASE_URL}" down 1
 
 lint:
 	golangci-lint run ./...

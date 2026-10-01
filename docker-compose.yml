@@ -1,25 +1,4 @@
 services:
-  postgres:
-    image: postgres:18
-    environment:
-      POSTGRES_USER: slbus
-      POSTGRES_PASSWORD: slbus
-      POSTGRES_DB: slbus
-    ports:
-      # Host port 5433, not 5432 — this dev machine already has another
-      # project's Postgres bound to 5432.
-      - "5433:5432"
-    volumes:
-      # postgres:18+ images store data under /var/lib/postgresql directly
-      # (pg_ctlcluster-style major-version subdirectories) — mounting at
-      # the old .../data path is rejected on startup as of this image.
-      - slbus_postgres_data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U slbus"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   redis:
     image: redis:8.10
     ports:
@@ -31,6 +10,3 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
-volumes:
-  slbus_postgres_data:
