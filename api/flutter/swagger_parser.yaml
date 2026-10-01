@@ -1,0 +1,11 @@
+# Copy this file to the root of a Flutter app (sl-bus-customer-app or
+# sl-bus-operator-app). See api/README.md for the full steps.
+swagger_parser:
+  # Path from the app to the backend's contract. Adjust if your checkout differs.
+  schema_path: ../sl-bus-backend/api/openapi.yaml
+  output_directory: lib/core/api
+  language: dart
+  json_serializer: freezed
+  use_freezed3: true   # required for freezed 3.x/4.x
+  put_in_folder: true
+  client_postfix: Api

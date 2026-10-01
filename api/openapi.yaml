@@ -1,95 +1,2316 @@
+# Generated from the handlers in internal/*/http and cmd/server/main.go, then maintained by hand.
 openapi: 3.0.3
 info:
   title: SL-Bus API
-  version: "1.0"
-  description: >
-    Source of truth for the SL-Bus REST contract (ARCHITECTURE.md §6.1).
-    Generates Go server interfaces and Dart client SDKs via oapi-codegen
-    (TECH_STACK.md §1). Written before implementation, not derived from it.
-servers:
-  - url: /v1
+  version: 1.0.0
+  description: 'Backend API for SL-Bus.
 
+
+    **Response format.** Most endpoints reply with an envelope: `{ "success": true, "data": ..., "meta": ... }` on success and `{ "success": false,
+    "error": { "code", "message", "fields?" } }` on failure. Paginated lists put `nextCursor` and `hasMore` in `meta`. The **booking and ticket
+    endpoints are the exception**: they return the bare object and a bare `{code, message}` error. Each is marked in its description.
+
+
+    **Authentication.** Send `Authorization: Bearer <accessToken>`. Tokens come from the `/v1/auth/*` endpoints. Each protected endpoint lists
+    the roles that may call it.
+
+
+    **Source of truth.** This file is hand-maintained (`api/openapi.yaml`) and is served at `/openapi.yaml`. A Go test fails if a route is added
+    without being documented here.'
+servers:
+- url: https://api.slbus.codescapelabs.com
+  description: Production
+- url: http://localhost:8080
+  description: Local development
+tags:
+- name: Platform
+- name: Auth
+- name: Operators (admin)
+- name: Fleet
+- name: Search
+- name: Bookings
+- name: Tickets
+- name: Realtime
+security:
+- bearerAuth: []
 paths:
   /healthz:
     get:
+      tags:
+      - Platform
+      operationId: healthCheck
       summary: Liveness/readiness check
+      description: Pings the database. Returns 503 `PLATFORM_DB_UNAVAILABLE` when it is unreachable.
+      security: []
       responses:
-        "200":
+        '200':
           description: Service is healthy
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessEnvelope"
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Database unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /v1/auth/register:
+    post:
+      tags:
+      - Auth
+      operationId: registerOperator
+      summary: Register an operator account
+      description: Creates a PENDING operator and its first user. A platform admin must approve it before the operator can use the fleet endpoints.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterOperatorRequest'
+      responses:
+        '201':
+          description: Operator registered, pending approval
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterOperatorResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/auth/otp/request:
+    post:
+      tags:
+      - Auth
+      operationId: requestOtp
+      summary: Request a login OTP for a passenger phone number
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestOtpRequest'
+      responses:
+        '202':
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmptyResponse'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/auth/otp/verify:
+    post:
+      tags:
+      - Auth
+      operationId: verifyOtp
+      summary: Verify an OTP and sign in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyOtpRequest'
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPairResponse'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/auth/login:
+    post:
+      tags:
+      - Auth
+      operationId: login
+      summary: Operator/staff/admin email + password login
+      description: Returns tokens directly, or an MFA challenge. When `mfaChallengeRequired` is true, finish with `/v1/auth/mfa/verify` (and `/v1/auth/mfa/enroll`
+        first if `mfaEnrollNeeded`) using the `preAuthToken`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Signed in, or MFA required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/auth/mfa/enroll:
+    post:
+      tags:
+      - Auth
+      operationId: enrollMfa
+      summary: Start TOTP enrollment
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollMfaRequest'
+      responses:
+        '200':
+          description: TOTP secret to scan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollMfaResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/auth/mfa/verify:
+    post:
+      tags:
+      - Auth
+      operationId: verifyMfa
+      summary: Complete login with a TOTP code
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyMfaRequest'
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPairResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/auth/token/refresh:
+    post:
+      tags:
+      - Auth
+      operationId: refreshToken
+      summary: Exchange a refresh token for a new token pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: New tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPairResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/auth/logout:
+    post:
+      tags:
+      - Auth
+      operationId: logout
+      summary: Revoke a refresh token
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204':
+          description: Logged out
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/auth/sessions:
+    get:
+      tags:
+      - Auth
+      operationId: listSessions
+      summary: List the caller's active sessions
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/auth/sessions/{id}:
+    delete:
+      tags:
+      - Auth
+      operationId: revokeSession
+      summary: Revoke one of the caller's sessions
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Session id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '204':
+          description: Session revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/operators:
+    get:
+      tags:
+      - Operators (admin)
+      operationId: listOperators
+      summary: List operators by status
+      description: '**Roles:** `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: status
+        in: query
+        description: Defaults to `pending`.
+        schema:
+          $ref: '#/components/schemas/OperatorStatus'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Operators
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/operators/{id}/approve:
+    post:
+      tags:
+      - Operators (admin)
+      operationId: approveOperator
+      summary: Approve a pending operator
+      description: '**Roles:** `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Operator id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated operator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/operators/{id}/reject:
+    post:
+      tags:
+      - Operators (admin)
+      operationId: rejectOperator
+      summary: Reject a pending operator
+      description: '**Roles:** `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Operator id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated operator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/operators/{id}/suspend:
+    post:
+      tags:
+      - Operators (admin)
+      operationId: suspendOperator
+      summary: Suspend an approved operator
+      description: '**Roles:** `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Operator id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated operator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/operators/{id}/reactivate:
+    post:
+      tags:
+      - Operators (admin)
+      operationId: reactivateOperator
+      summary: Reactivate a suspended operator
+      description: '**Roles:** `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Operator id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated operator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/fleet/buses:
+    post:
+      tags:
+      - Fleet
+      operationId: createBus
+      summary: Create a bus
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBusRequest'
+      responses:
+        '201':
+          description: Bus created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+    get:
+      tags:
+      - Fleet
+      operationId: listBuses
+      summary: List buses
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Buses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/fleet/buses/{id}:
+    get:
+      tags:
+      - Fleet
+      operationId: getBus
+      summary: Get a bus
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Bus id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags:
+      - Fleet
+      operationId: updateBus
+      summary: Update a bus (full replace of editable fields)
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Bus id
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBusRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/fleet/buses/{id}/seat-map:
+    get:
+      tags:
+      - Fleet
+      operationId: getSeatMap
+      summary: Get a bus's seat map
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Bus id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeatMapResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+      - Fleet
+      operationId: replaceSeatMap
+      summary: Replace a bus's seat map
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Bus id
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceSeatMapRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeatMapResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/fleet/routes:
+    post:
+      tags:
+      - Fleet
+      operationId: createRoute
+      summary: Create a route
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRouteRequest'
+      responses:
+        '201':
+          description: Route created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+    get:
+      tags:
+      - Fleet
+      operationId: listRoutes
+      summary: List routes
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Routes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/fleet/routes/{id}:
+    get:
+      tags:
+      - Fleet
+      operationId: getRoute
+      summary: Get a route
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Route id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags:
+      - Fleet
+      operationId: updateRoute
+      summary: Update a route (full replace of editable fields)
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Route id
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRouteRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/fleet/trips:
+    post:
+      tags:
+      - Fleet
+      operationId: createTrips
+      summary: Schedule one trip or a recurring series
+      description: 'Provide either `departureAt` (one trip) or `recurrence` (many). The bus and route must belong to the caller''s operator, and
+        the operator must be approved.
 
+
+        **Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTripsRequest'
+      responses:
+        '201':
+          description: Trips created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+    get:
+      tags:
+      - Fleet
+      operationId: listTrips
+      summary: List trips
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: routeId
+        in: query
+        schema:
+          type: string
+          format: uuid
+      - name: status
+        in: query
+        schema:
+          $ref: '#/components/schemas/TripStatus'
+      - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Trips
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/fleet/trips/{id}:
+    get:
+      tags:
+      - Fleet
+      operationId: getTrip
+      summary: Get a trip
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Trip id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags:
+      - Fleet
+      operationId: rescheduleTrip
+      summary: Reschedule a trip
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Trip id
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RescheduleTripRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/fleet/trips/{id}/cancel:
+    post:
+      tags:
+      - Fleet
+      operationId: cancelTrip
+      summary: Cancel a trip
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Trip id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/fleet/trips/{id}/fares:
+    patch:
+      tags:
+      - Fleet
+      operationId: updateTripFares
+      summary: Set per-seat-type fares for a trip
+      description: '**Roles:** `operator_admin`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Trip id
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTripFaresRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripFaresResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/trips/search:
+    get:
+      tags:
+      - Search
+      operationId: searchTrips
+      summary: Search trips by origin, destination and date
+      security: []
+      parameters:
+      - name: origin
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: destination
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: date
+        in: query
+        required: true
+        description: Travel date, YYYY-MM-DD (UTC).
+        schema:
+          type: string
+          format: date
+      - name: sort
+        in: query
+        description: Defaults to `departure`.
+        schema:
+          type: string
+          enum:
+          - departure
+          - price
+      - name: busClass
+        in: query
+        schema:
+          type: string
+      - name: minPrice
+        in: query
+        schema:
+          type: number
+          format: double
+      - name: maxPrice
+        in: query
+        schema:
+          type: number
+          format: double
+      - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Matching trips
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResultListResponse'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/bookings:
+    post:
+      tags:
+      - Bookings
+      operationId: createBooking
+      summary: Hold seats and create a booking
+      description: 'Fares are recomputed server-side; any `fareAmount` sent by the client is ignored. The hold expires at `holdExpiresAt`.
+
+
+        **Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object, and errors
+        are a bare `{code, message}` (`BookingError`).
+
+
+        **Roles:** `passenger`'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBookingRequest'
+      responses:
+        '201':
+          description: Seats held
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '400':
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+        '401':
+          description: Missing or invalid token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`BOOKING_SEAT_UNAVAILABLE`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+        '422':
+          description: '`VALIDATION_FAILED` (unknown/duplicate/no seats)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+  /v1/bookings/{id}:
+    get:
+      tags:
+      - Bookings
+      operationId: getBooking
+      summary: Get one of the caller's bookings
+      description: '**Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object,
+        and errors are a bare `{code, message}` (`BookingError`).
+
+
+        **Roles:** `passenger`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Booking id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '404':
+          description: '`BOOKING_NOT_FOUND` (also returned for bookings owned by someone else)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+  /v1/bookings/{id}/confirm:
+    post:
+      tags:
+      - Bookings
+      operationId: confirmBooking
+      summary: Confirm a held booking with a payment reference
+      description: '**Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object,
+        and errors are a bare `{code, message}` (`BookingError`).
+
+
+        **Roles:** `passenger`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Booking id
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmBookingRequest'
+      responses:
+        '200':
+          description: Booking confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '402':
+          description: '`PAYMENT_DECLINED`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+        '404':
+          description: '`BOOKING_NOT_FOUND`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+        '410':
+          description: '`BOOKING_HOLD_EXPIRED`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+  /v1/bookings/{id}/cancel:
+    post:
+      tags:
+      - Bookings
+      operationId: cancelBooking
+      summary: Cancel a booking
+      description: '**Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object,
+        and errors are a bare `{code, message}` (`BookingError`).
+
+
+        **Roles:** `passenger`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Booking id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Booking cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '404':
+          description: '`BOOKING_NOT_FOUND`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+  /v1/tickets/{qrToken}/check-in:
+    post:
+      tags:
+      - Tickets
+      operationId: checkInTicket
+      summary: Check a passenger in by QR token
+      description: '**Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object,
+        and errors are a bare `{code, message}` (`BookingError`).
+
+
+        **Roles:** `operator_staff`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: qrToken
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Checked in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInResult'
+        '400':
+          description: '`INVALID_QR_TOKEN`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+        '404':
+          description: '`TICKET_NOT_FOUND`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+        '409':
+          description: '`TICKET_ALREADY_CHECKED_IN`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingError'
+  /v1/ws/trips/{tripID}/seats:
+    get:
+      tags:
+      - Realtime
+      operationId: subscribeSeatUpdates
+      summary: Live seat status over WebSocket
+      description: WebSocket upgrade. Not callable from Swagger UI and not generated into client code. Authenticate with a valid access token
+        (any role) in the `token` query parameter, or in the `Sec-WebSocket-Protocol` header. The server then streams text frames, each a JSON
+        `SeatStatusMessage`. The connection closes after 15 minutes.
+      security: []
+      parameters:
+      - name: tripID
+        in: path
+        required: true
+        description: Trip id
+        schema:
+          type: string
+          format: uuid
+      - name: token
+        in: query
+        required: true
+        description: Access token (JWT).
+        schema:
+          type: string
+      responses:
+        '101':
+          description: Switching protocols; frames are `SeatStatusMessage` JSON
+        '400':
+          description: Missing tripID
+        '401':
+          description: Missing or invalid token
+      x-websocket: true
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor from the previous page's `meta.nextCursor`.
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      description: Page size (default 20).
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    BadRequest:
+      description: Request body is not valid JSON.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: VALIDATION_FAILED
+              message: Request body is not valid JSON.
+    Unauthorized:
+      description: Missing, invalid or expired access token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: AUTH_TOKEN_INVALID
+              message: Missing, invalid or expired access token.
+    Forbidden:
+      description: You don't have permission to perform this action.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: AUTH_FORBIDDEN
+              message: You don't have permission to perform this action.
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: NOT_FOUND
+              message: Resource not found.
+    Conflict:
+      description: State conflict, e.g. an invalid status transition.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: INVALID_STATUS_TRANSITION
+              message: State conflict, e.g. an invalid status transition.
+    ValidationFailed:
+      description: Validation failed. See `error.fields` for per-field issues.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: VALIDATION_FAILED
+              message: Validation failed. See `error.fields` for per-field issues.
+    RateLimited:
+      description: Too many requests.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: AUTH_OTP_RATE_LIMITED
+              message: Too many requests.
   schemas:
-    # ENGINEERING_STANDARDS.md §1 — every response uses one of these two shapes.
-    SuccessEnvelope:
-      type: object
-      required: [success, data]
-      properties:
-        success:
-          type: boolean
-          enum: [true]
-        data:
-          type: object
-        meta:
-          $ref: "#/components/schemas/Meta"
-
-    ErrorEnvelope:
-      type: object
-      required: [success, error]
-      properties:
-        success:
-          type: boolean
-          enum: [false]
-        error:
-          $ref: "#/components/schemas/ApiError"
-        meta:
-          $ref: "#/components/schemas/Meta"
-
-    ApiError:
-      type: object
-      required: [code, message]
-      properties:
-        code:
-          type: string
-          description: Namespaced, stable error code (ENGINEERING_STANDARDS.md §3)
-          example: BOOKING_SEAT_UNAVAILABLE
-        message:
-          type: string
-          description: Human-readable, specific, safe to show to the end user
-        fields:
-          type: array
-          items:
-            type: object
-            properties:
-              field:
-                type: string
-              issue:
-                type: string
-
     Meta:
+      type: object
+      properties:
+        requestId:
+          type: string
+    PageMeta:
       type: object
       properties:
         requestId:
           type: string
         nextCursor:
           type: string
+          description: Pass as `cursor` to fetch the next page.
         hasMore:
           type: boolean
-
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-
-security:
-  - bearerAuth: []
-
-# TODO(phase-1): add /auth/otp/request, /auth/otp/verify, /auth/login,
-#   /auth/mfa/verify, /auth/token/refresh per AUTHENTICATION_DESIGN.md.
-# TODO(phase-2): add /trips/search, /operators/{id}/... per SRS.md FR-SRCH/FR-FLT.
-# TODO(phase-3): add /bookings, /bookings/confirm per SRS.md FR-BKG, with the
-#   Idempotency-Key header requirement from ENGINEERING_STANDARDS.md §5.
+    FieldError:
+      type: object
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
+      required:
+      - field
+      - issue
+    ApiError:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Stable, namespaced error code.
+          example: VALIDATION_FAILED
+        message:
+          type: string
+          description: Safe to show to the end user.
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldError'
+      required:
+      - code
+      - message
+    ErrorEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `false`.
+        error:
+          $ref: '#/components/schemas/ApiError'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - error
+    BookingError:
+      type: object
+      properties:
+        code:
+          type: string
+          example: BOOKING_NOT_FOUND
+        message:
+          type: string
+      required:
+      - code
+      description: Bare error body used by the booking endpoints (no envelope). Some responses may have an empty or plain-text body.
+    EmptyData:
+      type: object
+      properties: {}
+      description: Empty object.
+    EmptyResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/EmptyData'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    HealthData:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+      required:
+      - status
+    HealthResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/HealthData'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    Role:
+      type: string
+      enum:
+      - passenger
+      - operator_staff
+      - operator_admin
+      - finance_admin
+      - support
+      - platform_admin
+    TokenPair:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        operatorId:
+          type: string
+          format: uuid
+          description: Present for operator roles.
+      required:
+      - accessToken
+      - refreshToken
+      - role
+    TokenPairResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/TokenPair'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    RegisterOperatorRequest:
+      type: object
+      properties:
+        businessName:
+          type: string
+        businessRegNo:
+          type: string
+        contactEmail:
+          type: string
+          format: email
+        contactPhone:
+          type: string
+        registrationDocUrl:
+          type: string
+        password:
+          type: string
+          format: password
+          minLength: 10
+      required:
+      - businessName
+      - businessRegNo
+      - contactEmail
+      - password
+    RegisterOperatorResult:
+      type: object
+      properties:
+        operatorId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          example: pending
+      required:
+      - operatorId
+      - userId
+      - status
+    RegisterOperatorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/RegisterOperatorResult'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    RequestOtpRequest:
+      type: object
+      properties:
+        phone:
+          type: string
+          example: '+94771234567'
+      required:
+      - phone
+    VerifyOtpRequest:
+      type: object
+      properties:
+        phone:
+          type: string
+        code:
+          type: string
+      required:
+      - phone
+      - code
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+        deviceFingerprint:
+          type: string
+      required:
+      - email
+      - password
+    LoginResult:
+      type: object
+      properties:
+        mfaChallengeRequired:
+          type: boolean
+        mfaEnrollNeeded:
+          type: boolean
+        preAuthToken:
+          type: string
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        operatorId:
+          type: string
+          format: uuid
+      description: Either an MFA challenge (`mfaChallengeRequired` + `preAuthToken`) or a token pair, never both.
+    LoginResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/LoginResult'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    EnrollMfaRequest:
+      type: object
+      properties:
+        preAuthToken:
+          type: string
+      required:
+      - preAuthToken
+    MfaEnrollment:
+      type: object
+      properties:
+        secret:
+          type: string
+        provisioningUri:
+          type: string
+          description: otpauth:// URI for QR display.
+      required:
+      - secret
+      - provisioningUri
+    EnrollMfaResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/MfaEnrollment'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    VerifyMfaRequest:
+      type: object
+      properties:
+        preAuthToken:
+          type: string
+        totpCode:
+          type: string
+      required:
+      - preAuthToken
+      - totpCode
+    RefreshTokenRequest:
+      type: object
+      properties:
+        refreshToken:
+          type: string
+      required:
+      - refreshToken
+    LogoutRequest:
+      type: object
+      properties:
+        refreshToken:
+          type: string
+      required:
+      - refreshToken
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+        deviceInfo:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+      required:
+      - id
+      - createdAt
+      - expiresAt
+    SessionListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Session'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    OperatorStatus:
+      type: string
+      enum:
+      - pending
+      - approved
+      - rejected
+      - suspended
+    Operator:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        businessRegNo:
+          type: string
+        status:
+          $ref: '#/components/schemas/OperatorStatus'
+        contactEmail:
+          type: string
+        contactPhone:
+          type: string
+        registrationDocUrl:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        approvedAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - id
+      - name
+      - businessRegNo
+      - status
+      - createdAt
+    OperatorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/Operator'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    OperatorListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Operator'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+      required:
+      - success
+      - data
+    Bus:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        registrationNo:
+          type: string
+        busClass:
+          type: string
+        amenities:
+          type: object
+          additionalProperties: true
+          description: 'Free-form amenities, e.g. `{"wifi": true, "ac": true}`.'
+        active:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+      required:
+      - id
+      - registrationNo
+      - busClass
+      - active
+      - createdAt
+    BusResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/Bus'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    BusListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Bus'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+      required:
+      - success
+      - data
+    CreateBusRequest:
+      type: object
+      properties:
+        registrationNo:
+          type: string
+        busClass:
+          type: string
+        amenities:
+          type: object
+          additionalProperties: true
+          description: 'Free-form amenities, e.g. `{"wifi": true, "ac": true}`.'
+      required:
+      - registrationNo
+      - busClass
+    UpdateBusRequest:
+      type: object
+      properties:
+        registrationNo:
+          type: string
+        busClass:
+          type: string
+        amenities:
+          type: object
+          additionalProperties: true
+          description: 'Free-form amenities, e.g. `{"wifi": true, "ac": true}`.'
+        active:
+          type: boolean
+      required:
+      - registrationNo
+      - busClass
+    Seat:
+      type: object
+      properties:
+        number:
+          type: string
+          example: 1A
+        type:
+          type: string
+          description: Seat type; fares are keyed by this.
+        row:
+          type: integer
+        col:
+          type: integer
+      required:
+      - number
+      - type
+    SeatMap:
+      type: object
+      properties:
+        totalSeats:
+          type: integer
+        seats:
+          type: array
+          items:
+            $ref: '#/components/schemas/Seat'
+      required:
+      - totalSeats
+    SeatMapResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/SeatMap'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    ReplaceSeatMapRequest:
+      type: object
+      properties:
+        seats:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Seat'
+      required:
+      - seats
+    RouteStop:
+      type: object
+      properties:
+        stopName:
+          type: string
+        sequence:
+          type: integer
+        arrivalOffsetMin:
+          type: integer
+          nullable: true
+        departureOffsetMin:
+          type: integer
+          nullable: true
+      required:
+      - stopName
+    Route:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        origin:
+          type: string
+        destination:
+          type: string
+        distanceKm:
+          type: number
+          format: double
+          nullable: true
+        stops:
+          type: array
+          items:
+            $ref: '#/components/schemas/RouteStop'
+        createdAt:
+          type: string
+          format: date-time
+      required:
+      - id
+      - origin
+      - destination
+      - createdAt
+    RouteResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/Route'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    RouteListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Route'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+      required:
+      - success
+      - data
+    CreateRouteRequest:
+      type: object
+      properties:
+        origin:
+          type: string
+        destination:
+          type: string
+        distanceKm:
+          type: number
+          format: double
+          nullable: true
+        stops:
+          type: array
+          items:
+            $ref: '#/components/schemas/RouteStop'
+      required:
+      - origin
+      - destination
+    UpdateRouteRequest:
+      type: object
+      properties:
+        origin:
+          type: string
+        destination:
+          type: string
+        distanceKm:
+          type: number
+          format: double
+          nullable: true
+        stops:
+          type: array
+          items:
+            $ref: '#/components/schemas/RouteStop'
+      required:
+      - origin
+      - destination
+    TripStatus:
+      type: string
+      enum:
+      - scheduled
+      - cancelled
+      - completed
+    Trip:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        routeId:
+          type: string
+          format: uuid
+        busId:
+          type: string
+          format: uuid
+        departureAt:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/TripStatus'
+        baseFare:
+          type: number
+          format: double
+        availableSeats:
+          type: integer
+      required:
+      - id
+      - routeId
+      - busId
+      - departureAt
+      - status
+      - baseFare
+      - availableSeats
+    TripResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/Trip'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    TripListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Trip'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+      required:
+      - success
+      - data
+    Recurrence:
+      type: object
+      properties:
+        startDate:
+          type: string
+          format: date
+          description: YYYY-MM-DD, UTC
+        endDate:
+          type: string
+          format: date
+          description: YYYY-MM-DD, UTC
+        weekdays:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 6
+          description: 0 = Sunday .. 6 = Saturday. Empty means every day.
+        timeOfDay:
+          type: string
+          example: 06:30
+          description: HH:MM, UTC
+      required:
+      - startDate
+      - endDate
+      - timeOfDay
+    CreateTripsRequest:
+      type: object
+      properties:
+        routeId:
+          type: string
+          format: uuid
+        busId:
+          type: string
+          format: uuid
+        departureAt:
+          type: string
+          format: date-time
+          description: One-off trip (RFC 3339). Use this or `recurrence`.
+        recurrence:
+          $ref: '#/components/schemas/Recurrence'
+        baseFare:
+          type: number
+          format: double
+          exclusiveMinimum: true
+          minimum: 0
+        fareOverrides:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+          description: Fare by seat type, overriding `baseFare`.
+      required:
+      - routeId
+      - busId
+      - baseFare
+    RescheduleTripRequest:
+      type: object
+      properties:
+        departureAt:
+          type: string
+          format: date-time
+      required:
+      - departureAt
+    UpdateTripFaresRequest:
+      type: object
+      properties:
+        fares:
+          type: object
+          minProperties: 1
+          additionalProperties:
+            type: number
+            format: double
+          description: Fare by seat type.
+      required:
+      - fares
+    TripFares:
+      type: object
+      additionalProperties:
+        type: number
+        format: double
+      description: Fare by seat type.
+    TripFaresResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/TripFares'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    SearchResult:
+      type: object
+      properties:
+        tripId:
+          type: string
+          format: uuid
+        operatorName:
+          type: string
+        origin:
+          type: string
+        destination:
+          type: string
+        departureAt:
+          type: string
+          format: date-time
+        busClass:
+          type: string
+        amenities:
+          type: object
+          additionalProperties: true
+          description: 'Free-form amenities, e.g. `{"wifi": true, "ac": true}`.'
+        baseFare:
+          type: number
+          format: double
+        availableSeats:
+          type: integer
+      required:
+      - tripId
+      - operatorName
+      - origin
+      - destination
+      - departureAt
+      - busClass
+      - baseFare
+      - availableSeats
+    SearchResultListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchResult'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+      required:
+      - success
+      - data
+    BookingStatus:
+      type: string
+      enum:
+      - held
+      - confirmed
+      - cancelled
+      - paid_but_expired
+    Booking:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tripId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/BookingStatus'
+        totalAmount:
+          type: number
+          format: double
+        holdExpiresAt:
+          type: string
+          format: date-time
+          description: Present while status is `held`.
+      required:
+      - id
+      - tripId
+      - status
+      - totalAmount
+    BookingSeatRequest:
+      type: object
+      properties:
+        seatNumber:
+          type: string
+        passengerName:
+          type: string
+        passengerNic:
+          type: string
+        fareAmount:
+          type: number
+          format: double
+          description: Ignored. Fares are computed server-side.
+      required:
+      - seatNumber
+      - passengerName
+    CreateBookingRequest:
+      type: object
+      properties:
+        tripId:
+          type: string
+          format: uuid
+        seats:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/BookingSeatRequest'
+      required:
+      - tripId
+      - seats
+    ConfirmBookingRequest:
+      type: object
+      properties:
+        paymentRef:
+          type: string
+      required:
+      - paymentRef
+    CheckInResult:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bookingId:
+          type: string
+          format: uuid
+        checkedIn:
+          type: boolean
+      required:
+      - id
+      - bookingId
+      - checkedIn
+    SeatStatusMessage:
+      type: object
+      properties:
+        action:
+          type: string
+          enum:
+          - status_changed
+        trip_id:
+          type: string
+          format: uuid
+        seat_numbers:
+          type: array
+          items:
+            type: string
+        new_status:
+          type: string
+          enum:
+          - held
+          - booked
+          - available
+      required:
+      - action
+      - trip_id
+      - seat_numbers
+      - new_status
+      description: Frame sent over the seat-updates WebSocket. Documented here so clients can model it; the spec cannot describe WebSocket frames
+        natively.
