@@ -1,0 +1,9 @@
+.git
+.github
+.githooks
+.env
+*.env
+.DS_Store
+/bin/
+/server
+deploy

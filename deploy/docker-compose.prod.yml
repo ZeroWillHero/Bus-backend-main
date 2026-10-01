@@ -1,0 +1,73 @@
+# Production stack. Lives in /opt/sl-bus on the server (copied by the deploy
+# workflow — the repo is never cloned there). Needs IMAGE and DOMAIN in the
+# shell env (deploy.yml sets them) plus a .env file with the app secrets.
+services:
+  migrate:
+    image: migrate/migrate:v4.18.1
+    # MIGRATE_DATABASE_URL is the superuser URL; the API uses slbus_app.
+    command: ["-path", "/migrations", "-database", "${MIGRATE_DATABASE_URL}", "up"]
+    volumes:
+      - ./db/migrations:/migrations:ro
+    env_file: .env
+    restart: "no"
+
+  api:
+    image: ${IMAGE}
+    command: ["server"]
+    env_file: .env
+    environment:
+      HTTP_ADDR: ":8080"
+      REDIS_ADDR: "redis:6379"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+  worker:
+    image: ${IMAGE}
+    command: ["worker"]
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.10
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:

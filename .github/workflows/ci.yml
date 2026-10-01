@@ -5,23 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 jobs:
   audit:
     runs-on: ubuntu-latest
     services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: slbus
-          POSTGRES_PASSWORD: slbus
-          POSTGRES_DB: slbus
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U slbus"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
       redis:
         image: redis:8.10
         ports: ["6379:6379"]

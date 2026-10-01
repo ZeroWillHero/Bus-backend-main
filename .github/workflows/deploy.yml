@@ -1,0 +1,106 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: sl-bus-backend
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
+        run: echo "image=${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy compose, Caddyfile and migrations
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "deploy/docker-compose.prod.yml,deploy/Caddyfile,db/migrations"
+          target: /opt/sl-bus
+          strip_components: 0
+
+      - name: Write .env and deploy
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE: ${{ needs.build-push.outputs.image }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATE_DATABASE_URL: ${{ secrets.MIGRATE_DATABASE_URL }}
+          JWT_SIGNING_KEY: ${{ secrets.JWT_SIGNING_KEY }}
+          QR_TOKEN_SECRET: ${{ secrets.QR_TOKEN_SECRET }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,DATABASE_URL,MIGRATE_DATABASE_URL,JWT_SIGNING_KEY,QR_TOKEN_SECRET
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /opt/sl-bus
+            mv -f deploy/docker-compose.prod.yml docker-compose.prod.yml
+            mv -f deploy/Caddyfile Caddyfile
+            rmdir deploy
+
+            umask 077
+            {
+              echo "APP_ENV=production"
+              echo "DATABASE_URL=${DATABASE_URL}"
+              echo "MIGRATE_DATABASE_URL=${MIGRATE_DATABASE_URL}"
+              echo "JWT_SIGNING_KEY=${JWT_SIGNING_KEY}"
+              echo "QR_TOKEN_SECRET=${QR_TOKEN_SECRET}"
+              echo "DOMAIN=${DOMAIN}"
+              echo "IMAGE=${IMAGE}"
+            } > .env
+
+            echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            docker image prune -f
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS "https://${{ secrets.DOMAIN }}/healthz"; then exit 0; fi
+            sleep 10
+          done
+          echo "healthz did not come up"; exit 1
