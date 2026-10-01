@@ -66,6 +66,11 @@ func main() {
 	}
 	defer pool.Close()
 
+	if err := bootstrapPlatformAdmin(ctx, pool, logger); err != nil {
+		logger.Error("bootstrap platform admin failed", "error", err)
+		os.Exit(1)
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(httpx.RequestID)
