@@ -9,4 +9,7 @@ var (
 	ErrInvalidStatusTransition = errors.New("invalid booking status transition")
 	ErrAlreadyCheckedIn        = errors.New("ticket already checked in")
 	ErrInvalidQRToken          = errors.New("invalid or tampered QR token")
+	ErrUnknownSeat             = errors.New("seat does not exist on this trip or trip is not bookable")
+	ErrDuplicateSeat           = errors.New("the same seat was selected more than once")
+	ErrNoSeatsSelected         = errors.New("no seats selected")
 )

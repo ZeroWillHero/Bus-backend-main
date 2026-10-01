@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sl-bus/backend/internal/finance/domain"
@@ -28,13 +30,39 @@ func (r *JournalRepository) PostEntry(
 	entry *domain.JournalEntry,
 	lines []*domain.JournalLine,
 ) error {
+	return r.post(ctx, entry, lines, "", 0)
+}
+
+// PostEntryAdjustingPayable posts the entry and the operator payable delta atomically.
+func (r *JournalRepository) PostEntryAdjustingPayable(
+	ctx context.Context,
+	entry *domain.JournalEntry,
+	lines []*domain.JournalLine,
+	operatorID string,
+	delta float64,
+) error {
+	return r.post(ctx, entry, lines, operatorID, delta)
+}
+
+func (r *JournalRepository) post(
+	ctx context.Context,
+	entry *domain.JournalEntry,
+	lines []*domain.JournalLine,
+	operatorID string,
+	delta float64,
+) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Insert entry
+	// System-generated entries have no author: store NULL, not an invalid uuid.
+	var createdBy *string
+	if entry.CreatedBy != "" {
+		createdBy = &entry.CreatedBy
+	}
+
 	var entryID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO finance.journal_entries (
@@ -43,31 +71,40 @@ func (r *JournalRepository) PostEntry(
 		RETURNING id
 	`,
 		entry.PeriodID, entry.EntryDate, entry.SourceType, entry.SourceID,
-		entry.Description, entry.CreatedBy, entry.ReversedEntryID,
+		entry.Description, createdBy, entry.ReversedEntryID,
 	).Scan(&entryID)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_journal_entries_source" {
+			return domain.ErrEntryAlreadyPosted
+		}
 		return fmt.Errorf("insert journal_entry: %w", err)
 	}
 
-	// Insert lines (each debit or credit, never both)
 	for _, line := range lines {
-		_, err := tx.Exec(ctx, `
-			INSERT INTO finance.journal_lines (
-				journal_entry_id, account_id, operator_id, debit, credit
-			) VALUES ($1, $2, $3, $4, $5)
-		`,
-			entryID, line.AccountID, line.OperatorID, line.Debit, line.Credit,
-		)
-		if err != nil {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO finance.journal_lines (journal_entry_id, account_id, operator_id, debit, credit)
+			VALUES ($1, $2, $3, $4, $5)
+		`, entryID, line.AccountID, line.OperatorID, line.Debit, line.Credit); err != nil {
 			return fmt.Errorf("insert journal_line: %w", err)
 		}
 	}
 
-	// Constraint trigger fires here (DEFERRABLE INITIALLY DEFERRED ensures all lines are in before check)
+	if operatorID != "" {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO finance.operator_ledger_balances (operator_id, payable_balance, updated_at)
+			VALUES ($1, $2, now())
+			ON CONFLICT (operator_id)
+			DO UPDATE SET payable_balance = operator_ledger_balances.payable_balance + $2, updated_at = now()
+		`, operatorID, delta); err != nil {
+			return fmt.Errorf("adjust operator payable: %w", err)
+		}
+	}
+
+	// The deferred balance trigger fires here: unbalanced entries fail the commit.
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit journal entry: %w", err)
 	}
-
 	return nil
 }
 
@@ -85,12 +122,16 @@ func (r *JournalRepository) FindBySource(
 	`, sourceType, sourceID)
 
 	var entry domain.JournalEntry
+	var createdBy *string
 	err := row.Scan(
 		&entry.ID, &entry.PeriodID, &entry.EntryDate, &entry.SourceType, &entry.SourceID,
-		&entry.Description, &entry.CreatedBy, &entry.ReversedEntryID, &entry.PostedAt, &entry.CreatedAt,
+		&entry.Description, &createdBy, &entry.ReversedEntryID, &entry.PostedAt, &entry.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan journal_entry: %w", err)
+	}
+	if createdBy != nil {
+		entry.CreatedBy = *createdBy
 	}
 
 	return &entry, nil
@@ -118,12 +159,16 @@ func (r *JournalRepository) ListByPeriod(
 	var entries []*domain.JournalEntry
 	for rows.Next() {
 		var entry domain.JournalEntry
+		var createdBy *string
 		err := rows.Scan(
 			&entry.ID, &entry.PeriodID, &entry.EntryDate, &entry.SourceType, &entry.SourceID,
-			&entry.Description, &entry.CreatedBy, &entry.ReversedEntryID, &entry.PostedAt, &entry.CreatedAt,
+			&entry.Description, &createdBy, &entry.ReversedEntryID, &entry.PostedAt, &entry.CreatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan entry: %w", err)
+		}
+		if createdBy != nil {
+			entry.CreatedBy = *createdBy
 		}
 		entries = append(entries, &entry)
 	}

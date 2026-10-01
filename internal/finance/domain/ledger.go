@@ -2,7 +2,15 @@
 // Double-entry ledger with operator sub-ledger and payout settlement.
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrEntryAlreadyPosted is returned when a journal entry for the same
+// (source_type, source_id) already exists. Callers treat it as success: the
+// outbox is at-least-once, so redelivery must not post twice.
+var ErrEntryAlreadyPosted = errors.New("journal entry already posted for this source")
 
 type AccountType string
 

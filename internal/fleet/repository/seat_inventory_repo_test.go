@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestHoldSeatsNoOverselling(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 
-			heldCount, err := repo.HoldSeats(ctx, tripID, []string{"A1"}, "booking-"+string(rune(idx)), 10*time.Minute)
+			heldCount, err := repo.HoldSeats(ctx, tripID, []string{"A1"}, fmt.Sprintf("00000000-0000-0000-0000-%012d", idx+1), 10*time.Minute)
 			if err != nil {
 				t.Errorf("goroutine %d: hold failed: %v", idx, err)
 				return
@@ -114,13 +115,13 @@ func TestReleaseExpiredHolds(t *testing.T) {
 			{
 				SeatNumber:    "A1",
 				Status:        "held",
-				BookingID:     "booking-1",
+				BookingID:     "00000000-0000-0000-0000-000000000001",
 				HoldExpiresAt: time.Now().Add(-1 * time.Hour), // expired
 			},
 			{
 				SeatNumber:    "A2",
 				Status:        "held",
-				BookingID:     "booking-2",
+				BookingID:     "00000000-0000-0000-0000-000000000002",
 				HoldExpiresAt: time.Now().Add(-30 * time.Minute), // expired
 			},
 		},
@@ -180,7 +181,7 @@ func TestConfirmSeatsTransition(t *testing.T) {
 
 	repo := NewSeatInventoryRepository(pool, nil)
 
-	bookingID := "test-booking-123"
+	bookingID := "00000000-0000-0000-0000-000000000123"
 	tripID := testutil.SeedTrip(t, pool, testutil.TripSeed{
 		AvailableSeats: 0,
 		Seats: []testutil.SeatSeed{
@@ -227,7 +228,7 @@ func TestReleaseSeatsTransition(t *testing.T) {
 			{
 				SeatNumber:    "A1",
 				Status:        "held",
-				BookingID:     "booking-1",
+				BookingID:     "00000000-0000-0000-0000-000000000001",
 				HoldExpiresAt: time.Now().Add(10 * time.Minute),
 			},
 		},

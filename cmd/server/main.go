@@ -47,15 +47,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Port 5433 matches docker-compose.yml's host mapping for local dev
-	// (5432 is often already taken by another project on a dev machine).
-	//
 	// Connects as slbus_app, NOT the slbus superuser migrations run as
 	// (db/migrations/000005_app_role.up.sql) — Postgres superusers bypass
 	// Row-Level Security unconditionally, so the API must run as a
 	// non-superuser role for the tenant-isolation policies
 	// (DATABASE_DESIGN.md §5) to have any effect at all.
-	dsn := getenv("DATABASE_URL", "postgres://slbus_app:slbus_app@localhost:5433/slbus?sslmode=disable")
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		logger.Error("DATABASE_URL is required (remote Supabase connection string; see .env.example)")
+		os.Exit(1)
+	}
 	pool, err := db.NewPool(ctx, dsn)
 	if err != nil {
 		// The API cannot serve any bounded context without the database;
@@ -85,7 +86,7 @@ func main() {
 	// Repos are constructed against the shared pool; cross-context/RLS
 	// call sites (ops registration, WithTenantContext) bind fresh
 	// instances to a specific pgx.Tx instead, per platform/db/txscope.go.
-	jwtIssuer := auth.NewJWTIssuer(getenv("JWT_SIGNING_KEY", "dev-only-insecure-signing-key-change-me"))
+	jwtIssuer := auth.NewJWTIssuer(requireSecret("JWT_SIGNING_KEY", "dev-only-insecure-signing-key-change-me"))
 	breachChecker := auth.NoopBreachChecker{}
 
 	userRepo := identityrepo.NewUserRepository(pool)
@@ -157,13 +158,14 @@ func main() {
 	ticketRepo := bookingrepo.NewTicketRepository(pool)
 	outboxRepo := bookingrepo.NewOutboxRepository(pool)
 	paymentGateway := bookingrepo.NewMockPaymentGateway()
-	qrTokenSecret := []byte(getenv("QR_TOKEN_SECRET", "dev-only-insecure-secret-change-me"))
+	qrTokenSecret := []byte(requireSecret("QR_TOKEN_SECRET", "dev-only-insecure-secret-change-me"))
 
 	checkoutSvc := bookingservice.NewCheckoutService(
 		bookingRepo,
 		bookingSeatRepo,
 		ticketRepo,
 		seatInventoryRepo,
+		seatInventoryRepo, // also the TripPricingPort: server-side fares
 		paymentGateway,
 		outboxRepo,
 		qrTokenSecret,
@@ -174,6 +176,7 @@ func main() {
 
 	r.Mount("/v1", bookinghttp.NewRouter(bookinghttp.Deps{
 		CheckoutService: checkoutSvc,
+		Verifier:        jwtIssuer,
 	}))
 
 	// WebSocket endpoint for live seat status updates
@@ -209,4 +212,21 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// requireSecret returns the secret from the environment. The insecure dev
+// fallback is only honoured when APP_ENV=development; anywhere else a missing
+// secret is fatal so a misconfigured deploy fails closed instead of signing
+// tokens with a publicly known key.
+func requireSecret(key, devFallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	if os.Getenv("APP_ENV") == "development" {
+		slog.Warn("using insecure dev default for secret", "key", key)
+		return devFallback
+	}
+	slog.Error("required secret not set (set it, or APP_ENV=development for local dev only)", "key", key)
+	os.Exit(1)
+	return ""
 }

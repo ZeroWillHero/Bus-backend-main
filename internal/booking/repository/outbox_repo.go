@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,16 +46,35 @@ func (r *OutboxRepository) Write(ctx context.Context, tx interface{}, eventType 
 	return nil
 }
 
-// PollUnprocessed retrieves unprocessed outbox events up to the limit.
-// Used by the worker to relay events to Phase 4/5 handlers.
+// DefaultOutboxLease is how long a polled event stays invisible to other
+// workers. If the claiming worker crashes or the handler fails, the event
+// becomes claimable again after the lease, which doubles as a retry backoff.
+const DefaultOutboxLease = 60 * time.Second
+
+// PollUnprocessed CLAIMS up to limit unprocessed events and returns them.
+//
+// A plain "SELECT ... LIMIT" would hand the same rows to every worker. The
+// claim uses FOR UPDATE SKIP LOCKED so concurrent pollers never receive the
+// same row, and stamps claimed_until so the claim outlives this statement (the
+// row lock alone is released as soon as the statement commits). Delivery stays
+// at-least-once: handlers must be idempotent.
 func (r *OutboxRepository) PollUnprocessed(ctx context.Context, limit int) ([]map[string]interface{}, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, event_type, payload, created_at
-		FROM platform.outbox_events
-		WHERE processed_at IS NULL
-		ORDER BY created_at ASC
-		LIMIT $1
-	`, limit)
+		WITH claimed AS (
+			SELECT id FROM platform.outbox_events
+			WHERE processed_at IS NULL
+			  AND (claimed_until IS NULL OR claimed_until < now())
+			ORDER BY created_at, id
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE platform.outbox_events e
+		SET claimed_until = now() + make_interval(secs => $2),
+		    attempts = e.attempts + 1
+		FROM claimed
+		WHERE e.id = claimed.id
+		RETURNING e.id, e.event_type, e.payload, e.created_at, e.attempts
+	`, limit, DefaultOutboxLease.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("poll unprocessed: %w", err)
 	}
@@ -63,9 +84,10 @@ func (r *OutboxRepository) PollUnprocessed(ctx context.Context, limit int) ([]ma
 	for rows.Next() {
 		var id, eventType string
 		var payload []byte
-		var createdAt interface{}
+		var createdAt time.Time
+		var attempts int
 
-		if err := rows.Scan(&id, &eventType, &payload, &createdAt); err != nil {
+		if err := rows.Scan(&id, &eventType, &payload, &createdAt, &attempts); err != nil {
 			return nil, fmt.Errorf("scan event: %w", err)
 		}
 
@@ -79,13 +101,17 @@ func (r *OutboxRepository) PollUnprocessed(ctx context.Context, limit int) ([]ma
 			"event_type": eventType,
 			"payload":    payloadMap,
 			"created_at": createdAt,
+			"attempts":   attempts,
 		})
 	}
-
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
+	// UPDATE ... RETURNING does not preserve the CTE's ORDER BY.
+	sort.SliceStable(events, func(i, j int) bool {
+		return events[i]["created_at"].(time.Time).Before(events[j]["created_at"].(time.Time))
+	})
 	return events, nil
 }
 

@@ -140,4 +140,17 @@ type SeatHoldPort interface {
 	HoldSeats(ctx context.Context, tripID string, seatNumbers []string, bookingID string, ttl time.Duration) (heldCount int, err error)
 	ConfirmSeats(ctx context.Context, tripID string, seatNumbers []string, bookingID string) error
 	ReleaseSeats(ctx context.Context, tripID string, seatNumbers []string) error
+	// ReleaseSeatsForBooking frees only seats currently held/booked FOR THIS booking.
+	// Unlike ReleaseSeats (by seat number) it can never free a seat that has since
+	// been re-held by somebody else after this booking's hold expired.
+	ReleaseSeatsForBooking(ctx context.Context, bookingID string) error
+}
+
+// TripPricingPort is the server-side source of truth for what a booking costs
+// and who it pays. The client's idea of a fare is never trusted.
+type TripPricingPort interface {
+	// SeatFares returns seat_number -> fare for a bookable (scheduled) trip.
+	// Returns ErrUnknownSeat if any requested seat is not on the trip.
+	SeatFares(ctx context.Context, tripID string, seatNumbers []string) (map[string]float64, error)
+	TripOperatorID(ctx context.Context, tripID string) (string, error)
 }

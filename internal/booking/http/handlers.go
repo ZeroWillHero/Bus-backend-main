@@ -9,6 +9,7 @@ import (
 
 	"github.com/sl-bus/backend/internal/booking/domain"
 	"github.com/sl-bus/backend/internal/booking/service"
+	"github.com/sl-bus/backend/internal/platform/auth"
 )
 
 // CreateBookingRequest holds the seat selection for a new booking
@@ -30,6 +31,16 @@ type BookingResponse struct {
 	HoldExpiresAt *string `json:"holdExpiresAt,omitempty"`
 }
 
+// actorID returns the authenticated user's id (JWT subject). It is empty/false
+// only if the auth middleware did not run, in which case callers must refuse.
+func actorID(r *http.Request) (string, bool) {
+	claims, ok := auth.FromContext(r.Context())
+	if !ok || claims.Subject == "" {
+		return "", false
+	}
+	return claims.Subject, true
+}
+
 func NewCreateBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateBookingRequest
@@ -49,8 +60,12 @@ func NewCreateBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 			}
 		}
 
-		// TODO: Extract passenger ID from JWT claims
-		passengerID := "temp-passenger-id"
+		// Identity comes from the verified JWT, never from the request body.
+		passengerID, ok := actorID(r)
+		if !ok {
+			http.Error(w, `{"code":"AUTH_UNAUTHORIZED"}`, http.StatusUnauthorized)
+			return
+		}
 
 		input := service.CreateHoldInput{
 			TripID:      req.TripID,
@@ -64,6 +79,8 @@ func NewCreateBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 			switch err {
 			case domain.ErrSeatUnavailable:
 				http.Error(w, `{"code":"BOOKING_SEAT_UNAVAILABLE","message":"Seat unavailable"}`, http.StatusConflict)
+			case domain.ErrUnknownSeat, domain.ErrDuplicateSeat, domain.ErrNoSeatsSelected:
+				http.Error(w, `{"code":"VALIDATION_FAILED","message":"Invalid seat selection"}`, http.StatusUnprocessableEntity)
 			default:
 				http.Error(w, `{"code":"INTERNAL_ERROR","message":"Failed to create booking"}`, http.StatusInternalServerError)
 			}
@@ -80,7 +97,12 @@ func NewGetBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		bookingID := chi.URLParam(r, "id")
 
-		booking, err := svc.GetBooking(r.Context(), bookingID)
+		actor, ok := actorID(r)
+		if !ok {
+			http.Error(w, `{"code":"AUTH_UNAUTHORIZED"}`, http.StatusUnauthorized)
+			return
+		}
+		booking, err := svc.GetBooking(r.Context(), actor, bookingID)
 		if err != nil {
 			http.Error(w, `{"code":"BOOKING_NOT_FOUND"}`, http.StatusNotFound)
 			return
@@ -105,7 +127,12 @@ func NewConfirmBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 			return
 		}
 
-		booking, err := svc.ConfirmBooking(r.Context(), bookingID, req.PaymentRef)
+		actor, ok := actorID(r)
+		if !ok {
+			http.Error(w, `{"code":"AUTH_UNAUTHORIZED"}`, http.StatusUnauthorized)
+			return
+		}
+		booking, err := svc.ConfirmBooking(r.Context(), actor, bookingID, req.PaymentRef)
 		if err != nil {
 			slog.Error("confirm_booking failed", "error", err)
 			switch err {
@@ -128,7 +155,12 @@ func NewCancelBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		bookingID := chi.URLParam(r, "id")
 
-		booking, err := svc.CancelBooking(r.Context(), bookingID)
+		actor, ok := actorID(r)
+		if !ok {
+			http.Error(w, `{"code":"AUTH_UNAUTHORIZED"}`, http.StatusUnauthorized)
+			return
+		}
+		booking, err := svc.CancelBooking(r.Context(), actor, bookingID)
 		if err != nil {
 			slog.Error("cancel_booking failed", "error", err)
 			http.Error(w, `{"code":"BOOKING_NOT_FOUND"}`, http.StatusNotFound)

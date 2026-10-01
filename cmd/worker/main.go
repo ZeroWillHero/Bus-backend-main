@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	financeservice "github.com/sl-bus/backend/internal/finance/service"
 	fleetrepo "github.com/sl-bus/backend/internal/fleet/repository"
 	"github.com/sl-bus/backend/internal/platform/db"
+	"github.com/sl-bus/backend/internal/platform/outbox"
 )
 
 func main() {
@@ -30,9 +32,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Port 5433 matches docker-compose.yml's host mapping for local dev
-	// (5432 is often already taken by another project on a dev machine).
-	dsn := getenv("DATABASE_URL", "postgres://slbus:slbus@localhost:5433/slbus?sslmode=disable")
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		logger.Error("DATABASE_URL is required (remote Supabase connection string; see .env.example)")
+		os.Exit(1)
+	}
 	pool, err := db.NewPool(ctx, dsn)
 	if err != nil {
 		logger.Error("failed to connect to database", "error", err)
@@ -65,6 +69,17 @@ func main() {
 	relayTicker := time.NewTicker(5 * time.Second)
 	defer relayTicker.Stop()
 
+	relay := &outbox.Relay{
+		Source:    outboxRepo,
+		BatchSize: 10,
+		Log:       logger,
+		Handlers: map[string]outbox.Handler{
+			"BookingConfirmed": bookingHandler(journalSvc.ProcessBookingConfirmed),
+			"BookingCancelled": bookingHandler(journalSvc.ProcessBookingCancelled),
+			"PaidButExpired":   bookingHandler(journalSvc.ProcessPaidButExpired),
+		},
+	}
+
 	logger.Info("worker started (Phase 3: seat-hold cleanup + outbox relay)")
 
 	for {
@@ -82,59 +97,25 @@ func main() {
 			}
 
 		case <-relayTicker.C:
-			// Poll outbox for unprocessed events and relay to Phase 4 (ledger) / Phase 5 (notifications)
-			events, err := outboxRepo.PollUnprocessed(ctx, 10)
+			stats, err := relay.RunOnce(ctx)
 			if err != nil {
-				logger.Error("outbox poll failed", "error", err)
-				continue
-			}
-
-			for _, event := range events {
-				eventType, ok := event["event_type"].(string)
-				if !ok {
-					logger.Warn("invalid event_type", "event_id", event["id"])
-					continue
-				}
-
-				eventID := event["id"].(string)
-				payload, ok := event["payload"].(map[string]interface{})
-				if !ok {
-					logger.Warn("invalid payload", "event_id", eventID, "event_type", eventType)
-					continue
-				}
-
-				// Phase 4: Process ledger events
-				var processErr error
-				switch eventType {
-				case "BookingConfirmed":
-					bookingID := payload["booking_id"].(string)
-					processErr = journalSvc.ProcessBookingConfirmed(ctx, bookingID, payload)
-
-				case "BookingCancelled":
-					bookingID := payload["booking_id"].(string)
-					processErr = journalSvc.ProcessBookingCancelled(ctx, bookingID, payload)
-
-				case "PaidButExpired":
-					bookingID := payload["booking_id"].(string)
-					processErr = journalSvc.ProcessPaidButExpired(ctx, bookingID, payload)
-
-				default:
-					// Unknown event type; log but don't error (Phase 5 handlers may catch it)
-					logger.DebugContext(ctx, "unknown event type", "event_type", eventType)
-				}
-
-				if processErr != nil {
-					logger.Error("failed to process outbox event",
-						"event_id", eventID, "event_type", eventType, "error", processErr)
-					continue
-				}
-
-				// Mark as processed
-				if err := outboxRepo.MarkProcessed(ctx, eventID); err != nil {
-					logger.Error("failed to mark event processed", "event_id", eventID, "error", err)
-				}
+				logger.Error("outbox relay failed", "error", err)
+			} else if stats.Processed+stats.Failed+stats.Skipped > 0 {
+				logger.Info("outbox relay batch", "processed", stats.Processed, "failed", stats.Failed, "skipped", stats.Skipped)
 			}
 		}
+	}
+}
+
+// bookingHandler adapts a ledger method to an outbox handler, extracting the
+// booking id with a checked assertion (a bad payload is an error, not a panic).
+func bookingHandler(fn func(ctx context.Context, bookingID string, payload map[string]interface{}) error) outbox.Handler {
+	return func(ctx context.Context, payload map[string]interface{}) error {
+		bookingID, ok := payload["booking_id"].(string)
+		if !ok || bookingID == "" {
+			return fmt.Errorf("outbox payload has no booking_id")
+		}
+		return fn(ctx, bookingID, payload)
 	}
 }
 

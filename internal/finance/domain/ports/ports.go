@@ -9,6 +9,11 @@ import (
 // JournalRepository handles journal entry persistence (immutable append-only).
 type JournalRepository interface {
 	PostEntry(ctx context.Context, entry *domain.JournalEntry, lines []*domain.JournalLine) error
+	// PostEntryAdjustingPayable posts the entry and applies delta to the operator's
+	// payable balance in ONE transaction, so a crash can never leave the ledger and
+	// the denormalized balance disagreeing. Returns domain.ErrEntryAlreadyPosted
+	// (and changes nothing) if the source was already posted.
+	PostEntryAdjustingPayable(ctx context.Context, entry *domain.JournalEntry, lines []*domain.JournalLine, operatorID string, delta float64) error
 	FindBySource(ctx context.Context, sourceType domain.EntrySource, sourceID string) (*domain.JournalEntry, error)
 	ListByPeriod(ctx context.Context, periodID string, limit int, offset int) ([]*domain.JournalEntry, error)
 }
