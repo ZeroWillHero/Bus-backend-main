@@ -46,7 +46,7 @@ func TestRelayContainsFailuresPerEvent(t *testing.T) {
 	relay := newRelay(src, map[string]outbox.Handler{
 		"Good":   func(context.Context, map[string]interface{}) error { return nil },
 		"Fails":  func(context.Context, map[string]interface{}) error { return errors.New("boom") },
-		"Panics": func(context.Context, map[string]interface{}) error { var m map[string]int; m["x"] = 1; return nil },
+		"Panics": func(context.Context, map[string]interface{}) error { panic("handler exploded") },
 	})
 
 	st, err := relay.RunOnce(context.Background())

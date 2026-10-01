@@ -59,11 +59,12 @@ func TestHoldSeatsNoOverselling(t *testing.T) {
 	var successCount int
 	var failCount int
 	for _, held := range results {
-		if held == 1 {
+		switch held {
+		case 1:
 			successCount++
-		} else if held == 0 {
+		case 0:
 			failCount++
-		} else {
+		default:
 			t.Errorf("unexpected heldCount: %d", held)
 		}
 	}

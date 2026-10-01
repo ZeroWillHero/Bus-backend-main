@@ -131,7 +131,7 @@ func TestLedgerEntriesAreImmutable(t *testing.T) {
 	if _, err := conn.Exec(e.ctx, `SET ROLE slbus_app`); err != nil {
 		t.Fatalf("set role: %v", err)
 	}
-	defer conn.Exec(e.ctx, `RESET ROLE`)
+	defer func() { _, _ = conn.Exec(e.ctx, `RESET ROLE`) }()
 	for _, q := range stmts {
 		if _, err := conn.Exec(e.ctx, q, booking); err == nil {
 			t.Errorf("slbus_app mutation succeeded: %s", q)

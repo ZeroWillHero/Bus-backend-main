@@ -150,7 +150,7 @@ func main() {
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: redisAddr,
 	})
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool, redisClient)
 	bookingRepo := bookingrepo.NewBookingRepository(pool)

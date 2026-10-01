@@ -30,12 +30,6 @@ func NewGateway(redis *redis.Client, verifier auth.Verifier, log *slog.Logger) *
 	}
 }
 
-type upgrader struct {
-	*websocket.Conn
-	w http.ResponseWriter
-	r *http.Request
-}
-
 // HandleSeatsSubscription is the HTTP handler for WS upgrade at /v1/ws/trips/{tripID}/seats.
 // Clients must pass a valid JWT token via query param (token=...) or Sec-WebSocket-Protocol header.
 func (g *Gateway) HandleSeatsSubscription(w http.ResponseWriter, r *http.Request) {
@@ -73,16 +67,16 @@ func (g *Gateway) HandleSeatsSubscription(w http.ResponseWriter, r *http.Request
 		g.log.Error("websocket upgrade failed", "error", err)
 		return
 	}
-	defer c.Close(websocket.StatusInternalError, "internal error")
+	defer func() { _ = c.Close(websocket.StatusInternalError, "internal error") }()
 
 	// Set read/write deadlines for graceful shutdown (15min idle timeout per plan)
 	c.SetReadLimit(64 * 1024) // 64KB max message size
-	defer c.Close(websocket.StatusNormalClosure, "")
+	defer func() { _ = c.Close(websocket.StatusNormalClosure, "") }()
 
 	// Subscribe to Redis channel for this trip
 	channel := fmt.Sprintf("trip:%s", tripID)
 	sub := g.redis.Subscribe(r.Context(), channel)
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 
 	// Create a context that times out after 15 minutes of inactivity
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
@@ -96,7 +90,7 @@ func (g *Gateway) HandleSeatsSubscription(w http.ResponseWriter, r *http.Request
 		select {
 		case <-ctx.Done():
 			g.log.Info("client connection idle timeout", "trip_id", tripID)
-			c.Close(websocket.StatusNormalClosure, "idle timeout")
+			_ = c.Close(websocket.StatusNormalClosure, "idle timeout")
 			return
 
 		default:

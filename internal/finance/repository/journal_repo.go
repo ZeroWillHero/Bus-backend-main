@@ -55,7 +55,7 @@ func (r *JournalRepository) post(
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// System-generated entries have no author: store NULL, not an invalid uuid.
 	var createdBy *string

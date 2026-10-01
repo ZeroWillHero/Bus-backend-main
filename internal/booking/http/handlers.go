@@ -89,7 +89,7 @@ func NewCreateBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(bookingToResponse(booking))
+		_ = json.NewEncoder(w).Encode(bookingToResponse(booking))
 	}
 }
 
@@ -109,7 +109,7 @@ func NewGetBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(bookingToResponse(booking))
+		_ = json.NewEncoder(w).Encode(bookingToResponse(booking))
 	}
 }
 
@@ -147,7 +147,7 @@ func NewConfirmBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(bookingToResponse(booking))
+		_ = json.NewEncoder(w).Encode(bookingToResponse(booking))
 	}
 }
 
@@ -168,7 +168,7 @@ func NewCancelBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(bookingToResponse(booking))
+		_ = json.NewEncoder(w).Encode(bookingToResponse(booking))
 	}
 }
 
@@ -191,7 +191,7 @@ func NewCheckInHandler(svc *service.CheckoutService) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":        ticket.ID,
 			"bookingId": ticket.BookingID,
 			"checkedIn": ticket.CheckedInAt != nil,

@@ -118,10 +118,3 @@ func bookingHandler(fn func(ctx context.Context, bookingID string, payload map[s
 		return fn(ctx, bookingID, payload)
 	}
 }
-
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
