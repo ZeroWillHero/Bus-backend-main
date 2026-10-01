@@ -71,7 +71,7 @@ func main() {
 	r.Use(httpx.RequestID)
 	r.Use(middleware.Logger)
 
-	r.Get("/healthz", func(w http.ResponseWriter, req *http.Request) {
+	health := func(w http.ResponseWriter, req *http.Request) {
 		if err := pool.Ping(req.Context()); err != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, httpx.APIError{
 				Code:    "PLATFORM_DB_UNAVAILABLE",
@@ -80,7 +80,7 @@ func main() {
 			return
 		}
 		httpx.WriteSuccess(w, http.StatusOK, map[string]string{"status": "ok"}, nil)
-	})
+	}
 
 	// Phase 1 — Identity & Operator Onboarding (IMPLEMENTATION_ROADMAP.md).
 	// Repos are constructed against the shared pool; cross-context/RLS
@@ -106,24 +106,6 @@ func main() {
 	registrationSvc := opsservice.NewRegistrationService(pool, breachChecker)
 	listingSvc := opsservice.NewListingService(pool)
 
-	r.Route("/v1/auth", func(r chi.Router) {
-		r.Post("/register", opshttp.NewRegisterHandler(registrationSvc))
-		r.Mount("/", identityhttp.NewRouter(identityhttp.Deps{
-			OTP:      otpSvc,
-			Login:    loginSvc,
-			MFA:      mfaSvc,
-			Tokens:   tokenSvc,
-			Verifier: jwtIssuer,
-		}))
-	})
-
-	r.Mount("/v1/operators", opshttp.NewRouter(opshttp.Deps{
-		Registration: registrationSvc,
-		Approval:     approvalSvc,
-		Listing:      listingSvc,
-		Verifier:     jwtIssuer,
-	}))
-
 	// Phase 2 — Fleet & Search (IMPLEMENTATION_ROADMAP.md). approvalSvc
 	// (constructed above for Phase 1) doubles as fleet's
 	// OperatorApprovalChecker port — same instance, no new wiring needed.
@@ -132,16 +114,6 @@ func main() {
 	routeSvc := fleetservice.NewRouteService(pool, approvalSvc)
 	tripSvc := fleetservice.NewTripService(pool, approvalSvc)
 	searchSvc := fleetservice.NewSearchService(pool)
-
-	r.Mount("/v1/fleet", fleethttp.NewRouter(fleethttp.Deps{
-		Bus:      busSvc,
-		SeatMap:  seatMapSvc,
-		Route:    routeSvc,
-		Trip:     tripSvc,
-		Search:   searchSvc,
-		Verifier: jwtIssuer,
-	}))
-	r.Get("/v1/trips/search", fleethttp.NewSearchHandler(searchSvc))
 
 	// Phase 3 — Booking Core (IMPLEMENTATION_ROADMAP.md).
 	// Constructs the seat-hold repository, checkout service, and booking HTTP handlers.
@@ -174,13 +146,37 @@ func main() {
 	// WebSocket gateway for live seat updates
 	wsGateway := wsgw.NewGateway(redisClient, jwtIssuer, logger)
 
-	r.Mount("/v1", bookinghttp.NewRouter(bookinghttp.Deps{
-		CheckoutService: checkoutSvc,
-		Verifier:        jwtIssuer,
-	}))
-
-	// WebSocket endpoint for live seat status updates
-	r.HandleFunc("GET /v1/ws/trips/{tripID}/seats", wsGateway.HandleSeatsSubscription)
+	mountRoutes(r, routeDeps{
+		Health:           health,
+		RegisterOperator: opshttp.NewRegisterHandler(registrationSvc),
+		Identity: identityhttp.Deps{
+			OTP:      otpSvc,
+			Login:    loginSvc,
+			MFA:      mfaSvc,
+			Tokens:   tokenSvc,
+			Verifier: jwtIssuer,
+		},
+		Ops: opshttp.Deps{
+			Registration: registrationSvc,
+			Approval:     approvalSvc,
+			Listing:      listingSvc,
+			Verifier:     jwtIssuer,
+		},
+		Fleet: fleethttp.Deps{
+			Bus:      busSvc,
+			SeatMap:  seatMapSvc,
+			Route:    routeSvc,
+			Trip:     tripSvc,
+			Search:   searchSvc,
+			Verifier: jwtIssuer,
+		},
+		Search: fleethttp.NewSearchHandler(searchSvc),
+		Booking: bookinghttp.Deps{
+			CheckoutService: checkoutSvc,
+			Verifier:        jwtIssuer,
+		},
+		SeatUpdatesWS: wsGateway.HandleSeatsSubscription,
+	})
 
 	addr := getenv("HTTP_ADDR", ":8080")
 	srv := &http.Server{
