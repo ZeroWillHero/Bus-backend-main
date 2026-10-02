@@ -171,3 +171,45 @@ func TestHTTPBookingOwnership(t *testing.T) {
 	}
 	_ = fmt.Sprint
 }
+
+// bookAndConfirm creates and confirms a one-seat booking as a fresh passenger.
+func bookAndConfirm(t *testing.T, router http.Handler, issuer *auth.JWTIssuer, scan func(string, interface{}, ...interface{}), trip, seat string) (bookingID, passengerTok string) {
+	t.Helper()
+	var passenger string
+	scan("INSERT INTO identity.users (phone, role) VALUES ('+94' || substr(replace(gen_random_uuid()::text,'-',''),1,12), 'passenger') RETURNING id::text", &passenger)
+	passengerTok = tokenFor(t, issuer, passenger, auth.RolePassenger)
+	rec := do(t, router, "POST", "/bookings/", passengerTok, map[string]interface{}{
+		"tripId": trip, "seats": []map[string]interface{}{{"seatNumber": seat, "passengerName": "P"}}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create booking: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if rec := do(t, router, "POST", "/bookings/"+resp.ID+"/confirm", passengerTok, map[string]string{"paymentRef": "pay-" + resp.ID}); rec.Code != http.StatusOK {
+		t.Fatalf("confirm booking: %d %s", rec.Code, rec.Body.String())
+	}
+	return resp.ID, passengerTok
+}
+
+// operator_admin may board passengers, like operator_staff; nobody else may.
+func TestCheckInRoles(t *testing.T) {
+	router, issuer, trip, scan := setup(t)
+	bookingID, passengerTok := bookAndConfirm(t, router, issuer, scan, trip, "A1")
+	var qr string
+	scan(`SELECT qr_token FROM booking.tickets WHERE booking_id = $1`, &qr, bookingID)
+	path := "/tickets/" + qr + "/check-in"
+
+	if rec := do(t, router, "POST", path, passengerTok, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("passenger check-in: got %d, want 403", rec.Code)
+	}
+	admin := tokenFor(t, issuer, "44444444-4444-4444-4444-444444444444", auth.RoleOperatorAdmin)
+	if rec := do(t, router, "POST", path, admin, nil); rec.Code != http.StatusOK {
+		t.Errorf("operator_admin check-in: got %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	staff := tokenFor(t, issuer, "55555555-5555-5555-5555-555555555555", auth.RoleOperatorStaff)
+	if rec := do(t, router, "POST", path, staff, nil); rec.Code != http.StatusConflict {
+		t.Errorf("operator_staff re-check-in: got %d, want 409 (already checked in, not 403)", rec.Code)
+	}
+}

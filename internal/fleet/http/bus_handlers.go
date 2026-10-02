@@ -19,6 +19,9 @@ type busResponse struct {
 	Amenities      map[string]any `json:"amenities,omitempty"`
 	Active         bool           `json:"active"`
 	CreatedAt      time.Time      `json:"createdAt"`
+	// TotalSeats is 0 and HasSeatMap false until a seat map is saved.
+	TotalSeats int  `json:"totalSeats"`
+	HasSeatMap bool `json:"hasSeatMap"`
 }
 
 func toBusResponse(b *domain.Bus) busResponse {
@@ -30,6 +33,32 @@ func toBusResponse(b *domain.Bus) busResponse {
 		Active:         b.Active,
 		CreatedAt:      b.CreatedAt,
 	}
+}
+
+func (h *handlers) busResponses(r *http.Request, buses []*domain.Bus) ([]busResponse, error) {
+	claims, _ := auth.FromContext(r.Context())
+	extras, err := h.deps.ReadModel.Buses(r.Context(), claims, service.BusIDs(buses))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]busResponse, 0, len(buses))
+	for _, b := range buses {
+		resp := toBusResponse(b)
+		if e, ok := extras[b.ID]; ok {
+			resp.TotalSeats, resp.HasSeatMap = e.TotalSeats, e.HasSeatMap
+		}
+		out = append(out, resp)
+	}
+	return out, nil
+}
+
+func (h *handlers) writeBus(w http.ResponseWriter, r *http.Request, status int, bus *domain.Bus) {
+	out, err := h.busResponses(r, []*domain.Bus{bus})
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	httpx.WriteSuccess(w, status, out[0], nil)
 }
 
 type createBusRequest struct {
@@ -53,7 +82,7 @@ func (h *handlers) createBus(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	httpx.WriteSuccess(w, http.StatusCreated, toBusResponse(bus), nil)
+	h.writeBus(w, r, http.StatusCreated, bus)
 }
 
 func (h *handlers) getBus(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +92,7 @@ func (h *handlers) getBus(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	httpx.WriteSuccess(w, http.StatusOK, toBusResponse(bus), nil)
+	h.writeBus(w, r, http.StatusOK, bus)
 }
 
 func (h *handlers) listBuses(w http.ResponseWriter, r *http.Request) {
@@ -74,9 +103,10 @@ func (h *handlers) listBuses(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	out := make([]busResponse, 0, len(buses))
-	for _, b := range buses {
-		out = append(out, toBusResponse(b))
+	out, err := h.busResponses(r, buses)
+	if err != nil {
+		writeDomainError(w, err)
+		return
 	}
 	hasMore := nextCursor != ""
 	httpx.WriteSuccess(w, http.StatusOK, out, &httpx.Meta{NextCursor: nextCursor, HasMore: &hasMore})
@@ -105,5 +135,5 @@ func (h *handlers) updateBus(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	httpx.WriteSuccess(w, http.StatusOK, toBusResponse(bus), nil)
+	h.writeBus(w, r, http.StatusOK, bus)
 }

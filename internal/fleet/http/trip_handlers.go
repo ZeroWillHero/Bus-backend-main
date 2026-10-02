@@ -13,13 +13,33 @@ import (
 )
 
 type tripResponse struct {
-	ID             string    `json:"id"`
-	RouteID        string    `json:"routeId"`
-	BusID          string    `json:"busId"`
-	DepartureAt    time.Time `json:"departureAt"`
-	Status         string    `json:"status"`
-	BaseFare       float64   `json:"baseFare"`
+	ID          string    `json:"id"`
+	RouteID     string    `json:"routeId"`
+	BusID       string    `json:"busId"`
+	DepartureAt time.Time `json:"departureAt"`
+	Status      string    `json:"status"`
+	BaseFare    float64   `json:"baseFare"`
+	// AvailableSeats is the denormalised counter kept at hold/confirm time;
+	// total/booked/held below come from the seat inventory.
 	AvailableSeats int       `json:"availableSeats"`
+	Currency       string    `json:"currency"`
+	TotalSeats     int       `json:"totalSeats"`
+	BookedSeats    int       `json:"bookedSeats"`
+	HeldSeats      int       `json:"heldSeats"`
+	Route          *routeRef `json:"route,omitempty"`
+	Bus            *busRef   `json:"bus,omitempty"`
+}
+
+type routeRef struct {
+	ID          string `json:"id"`
+	Origin      string `json:"origin"`
+	Destination string `json:"destination"`
+}
+
+type busRef struct {
+	ID             string `json:"id"`
+	RegistrationNo string `json:"registrationNo"`
+	BusClass       string `json:"busClass"`
 }
 
 func toTripResponse(t *domain.Trip) tripResponse {
@@ -31,7 +51,38 @@ func toTripResponse(t *domain.Trip) tripResponse {
 		Status:         string(t.Status),
 		BaseFare:       t.BaseFare,
 		AvailableSeats: t.AvailableSeats,
+		Currency:       service.Currency,
 	}
+}
+
+// tripResponses converts trips and fills the derived fields (seat counts,
+// embedded route/bus) with a single query for the whole page.
+func (h *handlers) tripResponses(r *http.Request, trips []*domain.Trip) ([]tripResponse, error) {
+	claims, _ := auth.FromContext(r.Context())
+	extras, err := h.deps.ReadModel.Trips(r.Context(), claims, service.TripIDs(trips))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tripResponse, 0, len(trips))
+	for _, t := range trips {
+		resp := toTripResponse(t)
+		if e, ok := extras[t.ID]; ok {
+			resp.TotalSeats, resp.BookedSeats, resp.HeldSeats = e.TotalSeats, e.BookedSeats, e.HeldSeats
+			resp.Route = &routeRef{ID: e.Route.ID, Origin: e.Route.Origin, Destination: e.Route.Destination}
+			resp.Bus = &busRef{ID: e.Bus.ID, RegistrationNo: e.Bus.RegistrationNo, BusClass: e.Bus.BusClass}
+		}
+		out = append(out, resp)
+	}
+	return out, nil
+}
+
+func (h *handlers) writeTrip(w http.ResponseWriter, r *http.Request, status int, trip *domain.Trip) {
+	out, err := h.tripResponses(r, []*domain.Trip{trip})
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	httpx.WriteSuccess(w, status, out[0], nil)
 }
 
 // recurrenceRequest's StartDate/EndDate/TimeOfDay are all interpreted as
@@ -95,9 +146,10 @@ func (h *handlers) createTrips(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	out := make([]tripResponse, 0, len(trips))
-	for _, t := range trips {
-		out = append(out, toTripResponse(t))
+	out, err := h.tripResponses(r, trips)
+	if err != nil {
+		writeDomainError(w, err)
+		return
 	}
 	httpx.WriteSuccess(w, http.StatusCreated, out, nil)
 }
@@ -145,7 +197,7 @@ func (h *handlers) getTrip(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	httpx.WriteSuccess(w, http.StatusOK, toTripResponse(trip), nil)
+	h.writeTrip(w, r, http.StatusOK, trip)
 }
 
 func (h *handlers) listTrips(w http.ResponseWriter, r *http.Request) {
@@ -160,9 +212,10 @@ func (h *handlers) listTrips(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	out := make([]tripResponse, 0, len(trips))
-	for _, t := range trips {
-		out = append(out, toTripResponse(t))
+	out, err := h.tripResponses(r, trips)
+	if err != nil {
+		writeDomainError(w, err)
+		return
 	}
 	hasMore := nextCursor != ""
 	httpx.WriteSuccess(w, http.StatusOK, out, &httpx.Meta{NextCursor: nextCursor, HasMore: &hasMore})
@@ -175,7 +228,7 @@ func (h *handlers) cancelTrip(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	httpx.WriteSuccess(w, http.StatusOK, toTripResponse(trip), nil)
+	h.writeTrip(w, r, http.StatusOK, trip)
 }
 
 type rescheduleTripRequest struct {
@@ -198,7 +251,7 @@ func (h *handlers) rescheduleTrip(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	httpx.WriteSuccess(w, http.StatusOK, toTripResponse(trip), nil)
+	h.writeTrip(w, r, http.StatusOK, trip)
 }
 
 type updateTripFaresRequest struct {

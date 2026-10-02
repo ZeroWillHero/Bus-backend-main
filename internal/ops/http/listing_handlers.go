@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sl-bus/backend/internal/ops/domain"
+	"github.com/sl-bus/backend/internal/platform/auth"
 	"github.com/sl-bus/backend/internal/platform/httpx"
 )
 
@@ -63,4 +64,20 @@ func (h *handlers) listOperators(w http.ResponseWriter, r *http.Request) {
 	}
 	hasMore := nextCursor != ""
 	httpx.WriteSuccess(w, http.StatusOK, out, &httpx.Meta{NextCursor: nextCursor, HasMore: &hasMore})
+}
+
+// getOwnOperator handles GET /v1/operators/me — the caller's own business
+// profile, used by the operator app's Profile screen.
+func (h *handlers) getOwnOperator(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.FromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, httpx.APIError{Code: "AUTH_TOKEN_INVALID", Message: "Please sign in again."}, nil)
+		return
+	}
+	operator, err := h.deps.Listing.GetOwn(r.Context(), claims)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	httpx.WriteSuccess(w, http.StatusOK, toOperatorResponse(operator), nil)
 }

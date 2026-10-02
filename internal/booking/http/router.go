@@ -26,9 +26,9 @@ func NewRouter(deps Deps) chi.Router {
 		r.Post("/{id}/cancel", NewCancelBookingHandler(deps.CheckoutService))
 	})
 
-	// Staff/operator endpoints
+	// Staff/operator endpoints — operator_admin may board passengers too.
 	r.Route("/tickets", func(r chi.Router) {
-		r.Use(auth.Middleware(deps.Verifier), auth.RequireRole(auth.RoleOperatorStaff))
+		r.Use(auth.Middleware(deps.Verifier), auth.RequireRole(auth.RoleOperatorStaff, auth.RoleOperatorAdmin))
 		r.Post("/{qrToken}/check-in", NewCheckInHandler(deps.CheckoutService))
 	})
 

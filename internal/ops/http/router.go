@@ -13,6 +13,11 @@ type Deps struct {
 	Approval     *service.ApprovalService
 	Listing      *service.ListingService
 	Verifier     auth.Verifier
+	// MountOperatorScoped lets other bounded contexts add read-only routes
+	// under /v1/operators/{id}/... (e.g. insights' dashboard) without this
+	// package depending on them. chi cannot mount two routers at the same
+	// prefix, so they attach to this one.
+	MountOperatorScoped func(r chi.Router)
 }
 
 // NewRouter mounts /v1/operators endpoints (admin approval workflow).
@@ -21,6 +26,12 @@ type Deps struct {
 func NewRouter(deps Deps) chi.Router {
 	h := &handlers{deps: deps}
 	r := chi.NewRouter()
+
+	// Any authenticated operator-side user may read their own operator record.
+	r.Group(func(r chi.Router) {
+		r.Use(auth.Middleware(deps.Verifier))
+		r.Get("/me", h.getOwnOperator)
+	})
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(deps.Verifier))
@@ -31,6 +42,10 @@ func NewRouter(deps Deps) chi.Router {
 		r.Post("/{id}/suspend", h.suspend)
 		r.Post("/{id}/reactivate", h.reactivate)
 	})
+
+	if deps.MountOperatorScoped != nil {
+		deps.MountOperatorScoped(r)
+	}
 
 	return r
 }

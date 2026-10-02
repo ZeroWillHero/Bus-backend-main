@@ -10,42 +10,56 @@ import (
 )
 
 type Deps struct {
-	Bus      *service.BusService
-	SeatMap  *service.SeatMapService
-	Route    *service.RouteService
-	Trip     *service.TripService
-	Search   *service.SearchService
-	Verifier auth.Verifier
+	Bus     *service.BusService
+	SeatMap *service.SeatMapService
+	Route   *service.RouteService
+	Trip    *service.TripService
+	Search  *service.SearchService
+	// ReadModel adds derived seat counts and embedded names to responses.
+	ReadModel *service.ReadModelService
+	Verifier  auth.Verifier
 }
 
-// NewRouter mounts /v1/fleet/* endpoints — operator_admin/platform_admin
-// only, exactly like Phase 1's /v1/operators admin routes.
+// NewRouter mounts /v1/fleet/* endpoints. Reads are open to operator_staff
+// (boarding staff need trips, routes, buses and seat maps); every write stays
+// operator_admin/platform_admin only.
 func NewRouter(deps Deps) chi.Router {
 	h := &handlers{deps: deps}
 	r := chi.NewRouter()
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(deps.Verifier))
-		r.Use(auth.RequireRole(auth.RoleOperatorAdmin, auth.RolePlatformAdmin))
 
-		r.Post("/buses", h.createBus)
-		r.Get("/buses", h.listBuses)
-		r.Get("/buses/{id}", h.getBus)
-		r.Patch("/buses/{id}", h.updateBus)
-		r.Get("/buses/{id}/seat-map", h.getSeatMap)
-		r.Put("/buses/{id}/seat-map", h.replaceSeatMap)
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireRole(auth.RoleOperatorAdmin, auth.RoleOperatorStaff, auth.RolePlatformAdmin))
 
-		r.Post("/routes", h.createRoute)
-		r.Get("/routes", h.listRoutes)
-		r.Get("/routes/{id}", h.getRoute)
-		r.Patch("/routes/{id}", h.updateRoute)
+			r.Get("/buses", h.listBuses)
+			r.Get("/buses/{id}", h.getBus)
+			r.Get("/buses/{id}/seat-map", h.getSeatMap)
 
-		r.Post("/trips", h.createTrips)
-		r.Get("/trips", h.listTrips)
-		r.Get("/trips/{id}", h.getTrip)
-		r.Post("/trips/{id}/cancel", h.cancelTrip)
-		r.Patch("/trips/{id}", h.rescheduleTrip)
-		r.Patch("/trips/{id}/fares", h.updateTripFares)
+			r.Get("/routes", h.listRoutes)
+			r.Get("/routes/{id}", h.getRoute)
+			r.Get("/routes/{id}/buses", h.listRouteBuses)
+
+			r.Get("/trips", h.listTrips)
+			r.Get("/trips/{id}", h.getTrip)
+		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireRole(auth.RoleOperatorAdmin, auth.RolePlatformAdmin))
+
+			r.Post("/buses", h.createBus)
+			r.Patch("/buses/{id}", h.updateBus)
+			r.Put("/buses/{id}/seat-map", h.replaceSeatMap)
+
+			r.Post("/routes", h.createRoute)
+			r.Patch("/routes/{id}", h.updateRoute)
+
+			r.Post("/trips", h.createTrips)
+			r.Post("/trips/{id}/cancel", h.cancelTrip)
+			r.Patch("/trips/{id}", h.rescheduleTrip)
+			r.Patch("/trips/{id}/fares", h.updateTripFares)
+		})
 	})
 
 	return r
