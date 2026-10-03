@@ -5,6 +5,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
 	"github.com/sl-bus/backend/internal/fleet/domain"
 	"github.com/sl-bus/backend/internal/platform/httpx"
 )
@@ -89,4 +92,46 @@ func (h *handlers) search(w http.ResponseWriter, r *http.Request) {
 	}
 	hasMore := nextCursor != ""
 	httpx.WriteSuccess(w, http.StatusOK, out, &httpx.Meta{NextCursor: nextCursor, HasMore: &hasMore})
+}
+
+type tripSeatResponse struct {
+	SeatNumber string  `json:"seatNumber"`
+	SeatType   string  `json:"seatType"`
+	Row        int     `json:"row"`
+	Col        int     `json:"col"`
+	Status     string  `json:"status"`
+	Fare       float64 `json:"fare"`
+}
+
+type tripSeatMapResponse struct {
+	TripID string             `json:"tripId"`
+	Seats  []tripSeatResponse `json:"seats"`
+}
+
+// tripSeats handles GET /v1/trips/{tripID}/seats — public, no auth, so a
+// passenger can pick seats before logging in (live updates then arrive
+// over the seat WebSocket).
+func (h *handlers) tripSeats(w http.ResponseWriter, r *http.Request) {
+	tripID := chi.URLParam(r, "tripID")
+	if _, err := uuid.Parse(tripID); err != nil {
+		writeDomainError(w, domain.ErrTripNotFound)
+		return
+	}
+	seats, err := h.deps.Search.TripSeats(r.Context(), tripID)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	out := tripSeatMapResponse{TripID: tripID, Seats: make([]tripSeatResponse, 0, len(seats))}
+	for _, s := range seats {
+		out.Seats = append(out.Seats, tripSeatResponse{
+			SeatNumber: s.SeatNumber,
+			SeatType:   s.SeatType,
+			Row:        s.Row,
+			Col:        s.Col,
+			Status:     s.Status,
+			Fare:       s.Fare,
+		})
+	}
+	httpx.WriteSuccess(w, http.StatusOK, out, nil)
 }

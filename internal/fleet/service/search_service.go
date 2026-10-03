@@ -42,3 +42,15 @@ func (s *SearchService) Search(ctx context.Context, criteria domain.SearchCriter
 	})
 	return results, nextCursor, err
 }
+
+// TripSeats backs the passenger seat-selection screen — public like Search,
+// and cross-tenant for the same reason.
+func (s *SearchService) TripSeats(ctx context.Context, tripID string) ([]domain.TripSeat, error) {
+	var seats []domain.TripSeat
+	err := platformdb.WithTenantContext(ctx, s.pool, searchClaims, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		seats, err = fleetrepo.NewSearchRepository(tx).TripSeats(ctx, tripID)
+		return err
+	})
+	return seats, err
+}

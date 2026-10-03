@@ -27,6 +27,8 @@ import (
 	identityhttp "github.com/sl-bus/backend/internal/identity/http"
 	identityrepo "github.com/sl-bus/backend/internal/identity/repository"
 	identityservice "github.com/sl-bus/backend/internal/identity/service"
+	insights "github.com/sl-bus/backend/internal/insights"
+	insightshttp "github.com/sl-bus/backend/internal/insights/http"
 	opshttp "github.com/sl-bus/backend/internal/ops/http"
 	opsservice "github.com/sl-bus/backend/internal/ops/service"
 	"github.com/sl-bus/backend/internal/platform/auth"
@@ -110,6 +112,7 @@ func main() {
 
 	registrationSvc := opsservice.NewRegistrationService(pool, breachChecker)
 	listingSvc := opsservice.NewListingService(pool)
+	insightsSvc := insights.NewService(pool)
 
 	// Phase 2 — Fleet & Search (IMPLEMENTATION_ROADMAP.md). approvalSvc
 	// (constructed above for Phase 1) doubles as fleet's
@@ -119,6 +122,7 @@ func main() {
 	routeSvc := fleetservice.NewRouteService(pool, approvalSvc)
 	tripSvc := fleetservice.NewTripService(pool, approvalSvc)
 	searchSvc := fleetservice.NewSearchService(pool)
+	fleetReadModel := fleetservice.NewReadModelService(pool)
 
 	// Phase 3 — Booking Core (IMPLEMENTATION_ROADMAP.md).
 	// Constructs the seat-hold repository, checkout service, and booking HTTP handlers.
@@ -167,15 +171,18 @@ func main() {
 			Listing:      listingSvc,
 			Verifier:     jwtIssuer,
 		},
+		Insights: insightshttp.Deps{Insights: insightsSvc, Verifier: jwtIssuer},
 		Fleet: fleethttp.Deps{
-			Bus:      busSvc,
-			SeatMap:  seatMapSvc,
-			Route:    routeSvc,
-			Trip:     tripSvc,
-			Search:   searchSvc,
-			Verifier: jwtIssuer,
+			Bus:       busSvc,
+			SeatMap:   seatMapSvc,
+			Route:     routeSvc,
+			Trip:      tripSvc,
+			Search:    searchSvc,
+			ReadModel: fleetReadModel,
+			Verifier:  jwtIssuer,
 		},
-		Search: fleethttp.NewSearchHandler(searchSvc),
+		Search:    fleethttp.NewSearchHandler(searchSvc),
+		TripSeats: fleethttp.NewTripSeatsHandler(searchSvc),
 		Booking: bookinghttp.Deps{
 			CheckoutService: checkoutSvc,
 			Verifier:        jwtIssuer,

@@ -26,6 +26,7 @@ tags:
 - name: Platform
 - name: Auth
 - name: Operators (admin)
+- name: Operator insights
 - name: Fleet
 - name: Search
 - name: Bookings
@@ -313,6 +314,26 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /v1/operators/me:
+    get:
+      tags:
+      - Operators
+      operationId: getOwnOperator
+      summary: Get the caller's own operator record
+      description: Returns 404 for callers without an operator (e.g. `platform_admin`).
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Operator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No operator for this caller
   /v1/operators/{id}/approve:
     post:
       tags:
@@ -441,6 +462,186 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /v1/operators/{id}/dashboard:
+    get:
+      tags:
+      - Operator insights
+      operationId: getOperatorDashboard
+      summary: Operator dashboard summary
+      description: 'Fleet counts, today''s trips and seat sales, and "needs attention" alerts for one operator, computed server-side. `{id}` may be `me`. Seats counted as `seatsSold` are booked seats on today''s non-cancelled trips; held (unpaid) seats are reported separately in `seatsHeld`. `today.trips` excludes cancelled trips, which are counted in `today.cancelledTrips`. "Today" is the calendar day in `tz` (default `Asia/Colombo`). `busesWithoutSeatMap` counts active buses only.
+
+
+        **Roles:** `operator_admin`, `operator_staff`, `platform_admin` (platform admins must pass an operator id, not `me`)'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/OperatorIdOrMe'
+      - $ref: '#/components/parameters/Tz'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorDashboardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/operators/{id}/analytics/series:
+    get:
+      tags:
+      - Operator insights
+      operationId: getOperatorRevenueSeries
+      summary: Revenue and bookings time series
+      description: 'One zero-filled point per local date in `[from, to]` (max 92 days, else `ANALYTICS_RANGE_TOO_LARGE`). `{id}` may be `me`.
+
+
+        **Revenue definition.** `grossRevenue` is the total of bookings confirmed on that day (bucketed by `confirmed_at`); `refunds` is the total of confirmed bookings cancelled that day (bucketed by `cancelled_at`; always `0.00` until a refund flow exists); `netRevenue = grossRevenue - refunds`. Platform commission and gateway fees are not deducted. Held (unpaid) bookings never count. Days are cut at midnight in `tz`.
+
+
+        **Roles:** `operator_admin`, `finance_admin`, `platform_admin` (not `operator_staff`)'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/OperatorIdOrMe'
+      - name: from
+        in: query
+        required: true
+        description: First date, inclusive (YYYY-MM-DD).
+        schema:
+          type: string
+          format: date
+      - name: to
+        in: query
+        required: true
+        description: Last date, inclusive (YYYY-MM-DD).
+        schema:
+          type: string
+          format: date
+      - name: granularity
+        in: query
+        description: Only `day` is supported.
+        schema:
+          type: string
+          enum:
+          - day
+          default: day
+      - $ref: '#/components/parameters/Tz'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsSeriesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/operators/{id}/analytics/summary:
+    get:
+      tags:
+      - Operator insights
+      operationId: getOperatorRevenueSummary
+      summary: Period revenue summary with comparison
+      description: 'Totals for a date range with an optional comparison period, cancellation metrics, average occupancy and the top 5 routes by revenue. Use `period=month_to_date` as a shortcut (this month so far against the same span of the previous month), or pass `from`/`to` and optionally `compareFrom`/`compareTo`. Revenue is defined as in the series endpoint. `comparison.deltaPercent` is `null` when the comparison period has no revenue. `averageOccupancy` is booked seats over total seats on non-cancelled trips departing in the period. `{id}` may be `me`.
+
+
+        **Roles:** `operator_admin`, `finance_admin`, `platform_admin` (not `operator_staff`)'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/OperatorIdOrMe'
+      - name: period
+        in: query
+        description: Shortcut; use instead of `from`/`to`.
+        schema:
+          type: string
+          enum:
+          - month_to_date
+      - name: from
+        in: query
+        required: false
+        description: First date, inclusive. Required unless `period` is given.
+        schema:
+          type: string
+          format: date
+      - name: to
+        in: query
+        required: false
+        description: Last date, inclusive. Required unless `period` is given.
+        schema:
+          type: string
+          format: date
+      - name: compareFrom
+        in: query
+        required: false
+        description: Start of the comparison period. Give together with `compareTo`.
+        schema:
+          type: string
+          format: date
+      - name: compareTo
+        in: query
+        required: false
+        description: End of the comparison period.
+        schema:
+          type: string
+          format: date
+      - $ref: '#/components/parameters/Tz'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsSummaryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /v1/operators/{id}/activity:
+    get:
+      tags:
+      - Operator insights
+      operationId: listOperatorActivity
+      summary: Recent activity feed
+      description: 'Newest-first events for the operator as structured fields (not display text), so the app can phrase and localise them. Event `type` is one of `booking_confirmed`, `booking_cancelled`, `trip_created`, `trip_cancelled`, `check_in`, `payout_initiated`, `payout_executed`, `operator_approved`. No passenger personal data is included. `operator_staff` see no amounts and no payout events. `{id}` may be `me`.
+
+
+        **Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/OperatorIdOrMe'
+      - $ref: '#/components/parameters/Cursor'
+      - name: limit
+        in: query
+        description: Page size (default 20, max 100).
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
   /v1/fleet/buses:
     post:
       tags:
@@ -474,7 +675,7 @@ paths:
       - Fleet
       operationId: listBuses
       summary: List buses
-      description: '**Roles:** `operator_admin`, `platform_admin`'
+      description: '**Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -496,7 +697,7 @@ paths:
       - Fleet
       operationId: getBus
       summary: Get a bus
-      description: '**Roles:** `operator_admin`, `platform_admin`'
+      description: '**Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -563,7 +764,7 @@ paths:
       - Fleet
       operationId: getSeatMap
       summary: Get a bus's seat map
-      description: '**Roles:** `operator_admin`, `platform_admin`'
+      description: '**Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -657,7 +858,7 @@ paths:
       - Fleet
       operationId: listRoutes
       summary: List routes
-      description: '**Roles:** `operator_admin`, `platform_admin`'
+      description: '**Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -679,7 +880,7 @@ paths:
       - Fleet
       operationId: getRoute
       summary: Get a route
-      description: '**Roles:** `operator_admin`, `platform_admin`'
+      description: '**Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -740,6 +941,39 @@ paths:
           $ref: '#/components/responses/NotFound'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+  /v1/fleet/routes/{id}/buses:
+    get:
+      tags:
+      - Fleet
+      operationId: listRouteBuses
+      summary: Buses with upcoming trips on a route
+      description: 'Buses that have at least one future scheduled trip on this route, soonest departure first. One request instead of loading
+        every trip and bus.
+
+
+        **Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Buses on the route (empty when none have upcoming trips)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteBusListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /v1/fleet/trips:
     post:
       tags:
@@ -777,7 +1011,7 @@ paths:
       - Fleet
       operationId: listTrips
       summary: List trips
-      description: '**Roles:** `operator_admin`, `platform_admin`'
+      description: '**Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -808,7 +1042,7 @@ paths:
       - Fleet
       operationId: getTrip
       summary: Get a trip
-      description: '**Roles:** `operator_admin`, `platform_admin`'
+      description: '**Roles:** `operator_admin`, `operator_staff`, `platform_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -998,6 +1232,31 @@ paths:
                 $ref: '#/components/schemas/SearchResultListResponse'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+  /v1/trips/{tripID}/seats:
+    get:
+      tags:
+      - Search
+      operationId: getTripSeats
+      summary: Get a trip's seat layout with live seat status
+      description: 'Public, like search, so passengers can pick seats before logging in. Returns the bus''s seat map for a bookable trip (scheduled, approved operator) with each seat''s current status and fare. `row`/`col` are the operator''s seat-map grid; gaps in `col` are aisles. Subscribe to `/v1/ws/trips/{tripID}/seats` for changes after this snapshot. `seats` is empty when the bus has no seat map.'
+      security: []
+      parameters:
+      - name: tripID
+        in: path
+        required: true
+        description: Trip id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Seat layout and status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripSeatMapResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /v1/bookings:
     post:
       tags:
@@ -1181,7 +1440,7 @@ paths:
         and errors are a bare `{code, message}` (`BookingError`).
 
 
-        **Roles:** `operator_staff`'
+        **Roles:** `operator_staff`, `operator_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -1221,9 +1480,10 @@ paths:
       - Realtime
       operationId: subscribeSeatUpdates
       summary: Live seat status over WebSocket
-      description: WebSocket upgrade. Not callable from Swagger UI and not generated into client code. Authenticate with a valid access token
-        (any role) in the `token` query parameter, or in the `Sec-WebSocket-Protocol` header. The server then streams text frames, each a JSON
-        `SeatStatusMessage`. The connection closes after 15 minutes.
+      description: WebSocket upgrade. Not callable from Swagger UI and not generated into client code. Public, like the seat map, so passengers
+        can watch seats before logging in; no token is needed. A client may still send an access token (any role) in the `token` query parameter
+        or the `Sec-WebSocket-Protocol` header, and if it does the token must be valid. The server then streams text frames, each a JSON `SeatStatusMessage`.
+        The connection closes after 15 minutes.
       security: []
       parameters:
       - name: tripID
@@ -1235,17 +1495,17 @@ paths:
           format: uuid
       - name: token
         in: query
-        required: true
-        description: Access token (JWT).
+        required: false
+        description: Optional access token (JWT). Rejected with 401 if present but invalid.
         schema:
           type: string
       responses:
         '101':
           description: Switching protocols; frames are `SeatStatusMessage` JSON
         '400':
-          description: Missing tripID
+          description: Missing or malformed tripID
         '401':
-          description: Missing or invalid token
+          description: Token sent but invalid
       x-websocket: true
 components:
   securitySchemes:
@@ -1267,6 +1527,20 @@ components:
       schema:
         type: integer
         minimum: 1
+    OperatorIdOrMe:
+      name: id
+      in: path
+      required: true
+      description: Operator UUID, or `me` for the caller's own operator. Operator-side roles may only read their own operator; `platform_admin` must pass a UUID.
+      schema:
+        type: string
+    Tz:
+      name: tz
+      in: query
+      description: IANA time zone used to cut calendar days.
+      schema:
+        type: string
+        default: Asia/Colombo
   responses:
     BadRequest:
       description: Request body is not valid JSON.
@@ -1758,6 +2032,424 @@ components:
       required:
       - success
       - data
+    TripRouteRef:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        origin:
+          type: string
+        destination:
+          type: string
+      required:
+      - id
+      - origin
+      - destination
+    TripBusRef:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        registrationNo:
+          type: string
+        busClass:
+          type: string
+      required:
+      - id
+      - registrationNo
+      - busClass
+    RouteBus:
+      type: object
+      properties:
+        bus:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            registrationNo:
+              type: string
+          required:
+          - id
+          - registrationNo
+        upcomingTrips:
+          type: integer
+        nextDepartureAt:
+          type: string
+          format: date-time
+      required:
+      - bus
+      - upcomingTrips
+      - nextDepartureAt
+    RouteBusListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RouteBus'
+      required:
+      - success
+      - data
+    Money:
+      type: string
+      pattern: '^-?\d+\.\d{2}$'
+      description: Decimal amount as a string with two decimals (ENGINEERING_STANDARDS.md section 7). The currency is in the sibling `currency` field.
+      example: '1250.00'
+    OperatorDashboard:
+      type: object
+      properties:
+        currency:
+          type: string
+          example: LKR
+        generatedAt:
+          type: string
+          format: date-time
+        fleet:
+          type: object
+          properties:
+            activeBuses:
+              type: integer
+            totalBuses:
+              type: integer
+            busesWithoutSeatMap:
+              type: integer
+              description: Active buses with no (or an empty) seat map.
+            routes:
+              type: integer
+            routesWithoutScheduledTrips:
+              type: integer
+            upcomingTrips:
+              type: integer
+          required:
+          - activeBuses
+          - totalBuses
+          - busesWithoutSeatMap
+          - routes
+          - routesWithoutScheduledTrips
+          - upcomingTrips
+        today:
+          type: object
+          properties:
+            date:
+              type: string
+              format: date
+              description: Today's local date in the requested time zone.
+            trips:
+              type: integer
+              description: Non-cancelled trips departing today.
+            cancelledTrips:
+              type: integer
+            seatsSold:
+              type: integer
+              description: Booked seats on today's non-cancelled trips.
+            seatsHeld:
+              type: integer
+              description: Unexpired holds on those trips; not counted as sold.
+            seatCapacity:
+              type: integer
+            nextDeparture:
+              type: object
+              nullable: true
+              properties:
+                tripId:
+                  type: string
+                  format: uuid
+                departureAt:
+                  type: string
+                  format: date-time
+                routeName:
+                  type: string
+                  example: Colombo → Kandy
+                busRegistrationNo:
+                  type: string
+              required:
+              - tripId
+              - departureAt
+              - routeName
+              - busRegistrationNo
+          required:
+          - date
+          - trips
+          - cancelledTrips
+          - seatsSold
+          - seatsHeld
+          - seatCapacity
+          - nextDeparture
+        alerts:
+          type: array
+          description: Up to 10 per type.
+          items:
+            $ref: '#/components/schemas/DashboardAlert'
+      required:
+      - currency
+      - generatedAt
+      - fleet
+      - today
+      - alerts
+    DashboardAlert:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+          - low_occupancy
+          - missing_seat_map
+          - route_without_trips
+        severity:
+          type: string
+          enum:
+          - info
+          - warning
+        tripId:
+          type: string
+          format: uuid
+        busId:
+          type: string
+          format: uuid
+        routeId:
+          type: string
+          format: uuid
+        message:
+          type: string
+        occupancy:
+          type: number
+          format: double
+          description: Present for `low_occupancy` (0 to 1). A scheduled trip departing within 24 hours and less than 30% full.
+      required:
+      - type
+      - severity
+      - message
+    OperatorDashboardResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/OperatorDashboard'
+      required:
+      - success
+      - data
+    SeriesPoint:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        grossRevenue:
+          $ref: '#/components/schemas/Money'
+        refunds:
+          $ref: '#/components/schemas/Money'
+        netRevenue:
+          $ref: '#/components/schemas/Money'
+        bookings:
+          type: integer
+        cancellations:
+          type: integer
+        seatsSold:
+          type: integer
+      required:
+      - date
+      - grossRevenue
+      - refunds
+      - netRevenue
+      - bookings
+      - cancellations
+      - seatsSold
+    AnalyticsSeries:
+      type: object
+      properties:
+        currency:
+          type: string
+          example: LKR
+        granularity:
+          type: string
+          enum:
+          - day
+        points:
+          type: array
+          items:
+            $ref: '#/components/schemas/SeriesPoint'
+      required:
+      - currency
+      - granularity
+      - points
+    AnalyticsSeriesResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/AnalyticsSeries'
+      required:
+      - success
+      - data
+    DatePeriod:
+      type: object
+      properties:
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+      required:
+      - from
+      - to
+    AnalyticsSummary:
+      type: object
+      properties:
+        currency:
+          type: string
+          example: LKR
+        period:
+          $ref: '#/components/schemas/DatePeriod'
+        grossRevenue:
+          $ref: '#/components/schemas/Money'
+        netRevenue:
+          $ref: '#/components/schemas/Money'
+        refunds:
+          $ref: '#/components/schemas/Money'
+        bookings:
+          type: integer
+        cancellations:
+          type: integer
+        cancellationRate:
+          type: number
+          format: double
+          description: cancellations / bookings (0 to 1), 0 when there are no bookings.
+        seatsSold:
+          type: integer
+        averageOccupancy:
+          type: number
+          format: double
+          description: Booked seats / total seats (0 to 1) on non-cancelled trips departing in the period.
+        comparison:
+          type: object
+          nullable: true
+          properties:
+            period:
+              $ref: '#/components/schemas/DatePeriod'
+            grossRevenue:
+              $ref: '#/components/schemas/Money'
+            deltaPercent:
+              type: number
+              format: double
+              nullable: true
+              description: Change in gross revenue vs the comparison period, in percent; null when that period had no revenue.
+          required:
+          - period
+          - grossRevenue
+          - deltaPercent
+        topRoutes:
+          type: array
+          description: Up to 5 routes by gross revenue.
+          items:
+            type: object
+            properties:
+              routeId:
+                type: string
+                format: uuid
+              name:
+                type: string
+                example: Colombo → Kandy
+              grossRevenue:
+                $ref: '#/components/schemas/Money'
+              bookings:
+                type: integer
+            required:
+            - routeId
+            - name
+            - grossRevenue
+            - bookings
+      required:
+      - currency
+      - period
+      - grossRevenue
+      - netRevenue
+      - refunds
+      - bookings
+      - cancellations
+      - cancellationRate
+      - seatsSold
+      - averageOccupancy
+      - comparison
+      - topRoutes
+    AnalyticsSummaryResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/AnalyticsSummary'
+      required:
+      - success
+      - data
+    ActivityItem:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Stable id of the event (not a UUID).
+        type:
+          type: string
+          enum:
+          - booking_confirmed
+          - booking_cancelled
+          - trip_created
+          - trip_cancelled
+          - check_in
+          - payout_initiated
+          - payout_executed
+          - operator_approved
+        occurredAt:
+          type: string
+          format: date-time
+        tripId:
+          type: string
+          format: uuid
+        bookingId:
+          type: string
+          format: uuid
+        payoutId:
+          type: string
+          format: uuid
+        routeName:
+          type: string
+          example: Colombo → Kandy
+        seats:
+          type: integer
+        amount:
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+      required:
+      - id
+      - type
+      - occurredAt
+    ActivityListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActivityItem'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+      required:
+      - success
+      - data
     Bus:
       type: object
       properties:
@@ -1777,12 +2469,19 @@ components:
         createdAt:
           type: string
           format: date-time
+        totalSeats:
+          type: integer
+          description: Seats on the bus's seat map; 0 when it has none.
+        hasSeatMap:
+          type: boolean
       required:
       - id
       - registrationNo
       - busClass
       - active
       - createdAt
+      - totalSeats
+      - hasSeatMap
     BusResponse:
       type: object
       properties:
@@ -1927,11 +2626,20 @@ components:
         createdAt:
           type: string
           format: date-time
+        scheduledTripCount:
+          type: integer
+          description: Future trips with status `scheduled`.
+        nextDepartureAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Earliest future scheduled departure, or null.
       required:
       - id
       - origin
       - destination
       - createdAt
+      - scheduledTripCount
     RouteResponse:
       type: object
       properties:
@@ -2024,6 +2732,21 @@ components:
           format: double
         availableSeats:
           type: integer
+          description: Denormalised counter kept at hold/confirm time (expired holds are returned by the sweeper). `totalSeats`, `bookedSeats` and `heldSeats` are read from the seat inventory.
+        currency:
+          type: string
+          example: LKR
+        totalSeats:
+          type: integer
+        bookedSeats:
+          type: integer
+        heldSeats:
+          type: integer
+          description: Unexpired holds only.
+        route:
+          $ref: '#/components/schemas/TripRouteRef'
+        bus:
+          $ref: '#/components/schemas/TripBusRef'
       required:
       - id
       - routeId
@@ -2032,6 +2755,10 @@ components:
       - status
       - baseFare
       - availableSeats
+      - currency
+      - totalSeats
+      - bookedSeats
+      - heldSeats
     TripResponse:
       type: object
       properties:
@@ -2287,6 +3014,61 @@ components:
       - id
       - bookingId
       - checkedIn
+    TripSeat:
+      type: object
+      properties:
+        seatNumber:
+          type: string
+          example: 1A
+        seatType:
+          type: string
+        row:
+          type: integer
+        col:
+          type: integer
+        status:
+          type: string
+          enum:
+          - available
+          - held
+          - booked
+        fare:
+          type: number
+          format: double
+          description: The trip's fare for this seat's type, falling back to the base fare.
+      required:
+      - seatNumber
+      - seatType
+      - row
+      - col
+      - status
+      - fare
+    TripSeatMap:
+      type: object
+      properties:
+        tripId:
+          type: string
+          format: uuid
+        seats:
+          type: array
+          items:
+            $ref: '#/components/schemas/TripSeat'
+      required:
+      - tripId
+      - seats
+    TripSeatMapResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/TripSeatMap'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
     SeatStatusMessage:
       type: object
       properties:
