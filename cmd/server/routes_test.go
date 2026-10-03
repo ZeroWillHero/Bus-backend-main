@@ -35,7 +35,7 @@ func normalize(route string) string {
 func TestOpenAPISpecMatchesRoutes(t *testing.T) {
 	noop := func(http.ResponseWriter, *http.Request) {}
 	r := chi.NewRouter()
-	mountRoutes(r, routeDeps{Health: noop, RegisterOperator: noop, Search: noop, SeatUpdatesWS: noop})
+	mountRoutes(r, routeDeps{Health: noop, RegisterOperator: noop, Search: noop, TripSeats: noop, SeatUpdatesWS: noop})
 
 	registered := map[string]bool{}
 	err := chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {

@@ -47,3 +47,16 @@ type TripSearchResult struct {
 type SearchRepository interface {
 	Search(ctx context.Context, criteria SearchCriteria) (results []TripSearchResult, nextCursor string, err error)
 }
+
+// TripSeat is one seat of a trip's seat map as a passenger sees it before
+// booking: where it sits on the operator's grid, whether it can still be
+// taken, and what it costs. Status is the raw inventory state ("available",
+// "held", "booked") — exactly what the hold endpoint will accept.
+type TripSeat struct {
+	SeatNumber string
+	SeatType   string
+	Row        int
+	Col        int
+	Status     string
+	Fare       float64
+}

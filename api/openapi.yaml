@@ -1232,6 +1232,31 @@ paths:
                 $ref: '#/components/schemas/SearchResultListResponse'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+  /v1/trips/{tripID}/seats:
+    get:
+      tags:
+      - Search
+      operationId: getTripSeats
+      summary: Get a trip's seat layout with live seat status
+      description: 'Public, like search, so passengers can pick seats before logging in. Returns the bus''s seat map for a bookable trip (scheduled, approved operator) with each seat''s current status and fare. `row`/`col` are the operator''s seat-map grid; gaps in `col` are aisles. Subscribe to `/v1/ws/trips/{tripID}/seats` for changes after this snapshot. `seats` is empty when the bus has no seat map.'
+      security: []
+      parameters:
+      - name: tripID
+        in: path
+        required: true
+        description: Trip id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Seat layout and status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripSeatMapResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /v1/bookings:
     post:
       tags:
@@ -1455,9 +1480,10 @@ paths:
       - Realtime
       operationId: subscribeSeatUpdates
       summary: Live seat status over WebSocket
-      description: WebSocket upgrade. Not callable from Swagger UI and not generated into client code. Authenticate with a valid access token
-        (any role) in the `token` query parameter, or in the `Sec-WebSocket-Protocol` header. The server then streams text frames, each a JSON
-        `SeatStatusMessage`. The connection closes after 15 minutes.
+      description: WebSocket upgrade. Not callable from Swagger UI and not generated into client code. Public, like the seat map, so passengers
+        can watch seats before logging in; no token is needed. A client may still send an access token (any role) in the `token` query parameter
+        or the `Sec-WebSocket-Protocol` header, and if it does the token must be valid. The server then streams text frames, each a JSON `SeatStatusMessage`.
+        The connection closes after 15 minutes.
       security: []
       parameters:
       - name: tripID
@@ -1469,17 +1495,17 @@ paths:
           format: uuid
       - name: token
         in: query
-        required: true
-        description: Access token (JWT).
+        required: false
+        description: Optional access token (JWT). Rejected with 401 if present but invalid.
         schema:
           type: string
       responses:
         '101':
           description: Switching protocols; frames are `SeatStatusMessage` JSON
         '400':
-          description: Missing tripID
+          description: Missing or malformed tripID
         '401':
-          description: Missing or invalid token
+          description: Token sent but invalid
       x-websocket: true
 components:
   securitySchemes:
@@ -2988,6 +3014,61 @@ components:
       - id
       - bookingId
       - checkedIn
+    TripSeat:
+      type: object
+      properties:
+        seatNumber:
+          type: string
+          example: 1A
+        seatType:
+          type: string
+        row:
+          type: integer
+        col:
+          type: integer
+        status:
+          type: string
+          enum:
+          - available
+          - held
+          - booked
+        fare:
+          type: number
+          format: double
+          description: The trip's fare for this seat's type, falling back to the base fare.
+      required:
+      - seatNumber
+      - seatType
+      - row
+      - col
+      - status
+      - fare
+    TripSeatMap:
+      type: object
+      properties:
+        tripId:
+          type: string
+          format: uuid
+        seats:
+          type: array
+          items:
+            $ref: '#/components/schemas/TripSeat'
+      required:
+      - tripId
+      - seats
+    TripSeatMapResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/TripSeatMap'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
     SeatStatusMessage:
       type: object
       properties:

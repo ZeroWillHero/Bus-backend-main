@@ -181,7 +181,8 @@ func main() {
 			ReadModel: fleetReadModel,
 			Verifier:  jwtIssuer,
 		},
-		Search: fleethttp.NewSearchHandler(searchSvc),
+		Search:    fleethttp.NewSearchHandler(searchSvc),
+		TripSeats: fleethttp.NewTripSeatsHandler(searchSvc),
 		Booking: bookinghttp.Deps{
 			CheckoutService: checkoutSvc,
 			Verifier:        jwtIssuer,

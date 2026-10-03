@@ -73,6 +73,12 @@ func NewSearchHandler(search *service.SearchService) http.HandlerFunc {
 	return (&handlers{deps: Deps{Search: search}}).search
 }
 
+// NewTripSeatsHandler is mounted directly at GET /v1/trips/{tripID}/seats
+// in cmd/server/main.go — public, no auth, like search.
+func NewTripSeatsHandler(search *service.SearchService) http.HandlerFunc {
+	return (&handlers{deps: Deps{Search: search}}).tripSeats
+}
+
 type handlers struct {
 	deps Deps
 }

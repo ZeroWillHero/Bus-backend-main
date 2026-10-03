@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/sl-bus/backend/internal/platform/auth"
@@ -31,15 +32,22 @@ func NewGateway(redis *redis.Client, verifier auth.Verifier, log *slog.Logger) *
 }
 
 // HandleSeatsSubscription is the HTTP handler for WS upgrade at /v1/ws/trips/{tripID}/seats.
-// Clients must pass a valid JWT token via query param (token=...) or Sec-WebSocket-Protocol header.
+// The feed is public, like GET /v1/trips/{tripID}/seats, so passengers can watch
+// seats before logging in. A JWT may still be passed via query param (token=...)
+// or Sec-WebSocket-Protocol header; if one is sent it must be valid.
 func (g *Gateway) HandleSeatsSubscription(w http.ResponseWriter, r *http.Request) {
 	tripID := r.PathValue("tripID")
 	if tripID == "" {
 		http.Error(w, "missing tripID", http.StatusBadRequest)
 		return
 	}
+	// Anyone can subscribe, so only allow real trip ids as Redis channel names.
+	if _, err := uuid.Parse(tripID); err != nil {
+		http.Error(w, "invalid tripID", http.StatusBadRequest)
+		return
+	}
 
-	// Extract & validate JWT from query param or Sec-WebSocket-Protocol header
+	// Extract optional JWT from query param or Sec-WebSocket-Protocol header
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		// Fallback to Sec-WebSocket-Protocol header
@@ -49,16 +57,15 @@ func (g *Gateway) HandleSeatsSubscription(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	if token == "" {
-		http.Error(w, "missing authentication token", http.StatusUnauthorized)
-		return
-	}
-
-	// Validate token; we don't enforce role here (any authenticated user can observe seat updates)
-	claims, err := g.verifier.Verify(token)
-	if err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
-		return
+	userID := "anonymous"
+	if token != "" {
+		// We don't enforce role here (any authenticated user can observe seat updates)
+		claims, err := g.verifier.Verify(token)
+		if err != nil {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		userID = claims.Subject
 	}
 
 	// Upgrade connection
@@ -82,7 +89,7 @@ func (g *Gateway) HandleSeatsSubscription(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
 
-	g.log.Info("client subscribed", "trip_id", tripID, "user_id", claims.Subject)
+	g.log.Info("client subscribed", "trip_id", tripID, "user_id", userID)
 
 	// Relay messages from Redis to WebSocket
 	for {
