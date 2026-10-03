@@ -315,9 +315,10 @@ func Seed(ctx context.Context, pool *pgxpool.Pool, opt Options) (*Summary, error
 				for _, i := range idx {
 					bq(`INSERT INTO booking.booking_seats (booking_id, seat_number, passenger_name, fare_amount) VALUES ($1,$2,$3,$4)`,
 						bookingID, seats[i].number, firstNames[rng.Intn(len(firstNames))]+" "+lastNames[rng.Intn(len(lastNames))], fareFor(sl.fare, seats[i].typ))
-					if bstatus == "confirmed" {
+					switch bstatus {
+					case "confirmed":
 						seats[i].status, seats[i].bookingID = "booked", bookingID
-					} else if bstatus == "held" {
+					case "held":
 						seats[i].status, seats[i].bookingID, seats[i].holdExpires = "held", bookingID, holdExpires
 					}
 				}
