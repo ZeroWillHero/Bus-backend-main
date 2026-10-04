@@ -25,11 +25,12 @@ const (
 
 // RequiresMFA reports whether role must complete TOTP MFA to obtain a
 // fully-authenticated session (AUTHENTICATION_DESIGN.md §1 — every role
-// except passenger, which is passwordless, and operator_staff, whose
-// blast radius doesn't justify the friction).
+// except operator_staff, whose blast radius doesn't justify the friction).
+// Passengers sign in with email + password + TOTP while there is no SMS
+// gateway for the phone + OTP flow.
 func RequiresMFA(role Role) bool {
 	switch role {
-	case RolePassenger, RoleOperatorStaff:
+	case RoleOperatorStaff:
 		return false
 	default:
 		return true

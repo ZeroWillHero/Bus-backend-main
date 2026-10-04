@@ -1,6 +1,7 @@
 package http
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/sl-bus/backend/internal/identity/domain"
@@ -32,6 +33,18 @@ func writeDomainError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusNotFound, httpx.APIError{Code: "AUTH_USER_NOT_FOUND", Message: "Account not found."}, nil)
 	case domain.ErrSessionNotOwned:
 		httpx.WriteError(w, http.StatusForbidden, httpx.APIError{Code: "AUTH_FORBIDDEN", Message: "You don't have permission to perform this action."}, nil)
+	case domain.ErrEmailTaken:
+		httpx.WriteError(w, http.StatusConflict, httpx.APIError{Code: "AUTH_EMAIL_TAKEN", Message: "An account with this email already exists. Please sign in."}, nil)
+	case domain.ErrPasswordTooShort:
+		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.APIError{
+			Code:    "VALIDATION_FAILED",
+			Message: "Please check the highlighted fields.",
+			Fields:  []httpx.FieldError{{Field: "password", Issue: fmt.Sprintf("Must be at least %d characters.", service.MinPasswordLength)}},
+		}, nil)
+	case domain.ErrPasswordBreached:
+		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.APIError{Code: "AUTH_PASSWORD_BREACHED", Message: "That password has appeared in a data breach. Please choose another."}, nil)
+	case domain.ErrMFAAlreadyEnrolled:
+		httpx.WriteError(w, http.StatusConflict, httpx.APIError{Code: "AUTH_MFA_ALREADY_ENROLLED", Message: "An authenticator app is already set up for this account."}, nil)
 	case service.ErrOperatorSuspended:
 		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.APIError{Code: "OPS_OPERATOR_SUSPENDED", Message: "This operator account has been suspended."}, nil)
 	default:

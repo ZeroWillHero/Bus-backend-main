@@ -29,7 +29,7 @@ func TestRequiresMFA(t *testing.T) {
 		role Role
 		want bool
 	}{
-		{RolePassenger, false},
+		{RolePassenger, true},
 		{RoleOperatorStaff, false},
 		{RoleOperatorAdmin, true},
 		{RoleFinanceAdmin, true},
@@ -50,7 +50,10 @@ func TestTrustedDeviceEligible(t *testing.T) {
 	if !TrustedDeviceEligible(RoleOperatorAdmin) {
 		t.Errorf("operator_admin should be trusted-device eligible")
 	}
-	if TrustedDeviceEligible(RolePassenger) {
-		t.Errorf("passenger doesn't use MFA at all, so it can't be trusted-device eligible")
+	if !TrustedDeviceEligible(RolePassenger) {
+		t.Errorf("passenger should be trusted-device eligible")
+	}
+	if TrustedDeviceEligible(RoleOperatorStaff) {
+		t.Errorf("operator_staff doesn't use MFA at all, so it can't be trusted-device eligible")
 	}
 }

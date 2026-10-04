@@ -106,6 +106,7 @@ func main() {
 	approvalSvc := opsservice.NewApprovalService(pool)
 
 	otpSvc := identityservice.NewOTPService(otpRepo, userRepo, identityservice.ConsoleNotifier{}, tokenIssuer)
+	passengerRegistrationSvc := identityservice.NewPassengerRegistrationService(userRepo, breachChecker)
 	loginSvc := identityservice.NewLoginService(userRepo, trustedDeviceRepo, breachChecker, approvalSvc, preAuthStore, tokenIssuer)
 	mfaSvc := identityservice.NewMFAService(userRepo, trustedDeviceRepo, preAuthStore, tokenIssuer)
 	tokenSvc := identityservice.NewTokenService(refreshRepo, userRepo, jwtIssuer, tokenIssuer)
@@ -159,11 +160,12 @@ func main() {
 		Health:           health,
 		RegisterOperator: opshttp.NewRegisterHandler(registrationSvc),
 		Identity: identityhttp.Deps{
-			OTP:      otpSvc,
-			Login:    loginSvc,
-			MFA:      mfaSvc,
-			Tokens:   tokenSvc,
-			Verifier: jwtIssuer,
+			OTP:                   otpSvc,
+			PassengerRegistration: passengerRegistrationSvc,
+			Login:                 loginSvc,
+			MFA:                   mfaSvc,
+			Tokens:                tokenSvc,
+			Verifier:              jwtIssuer,
 		},
 		Ops: opshttp.Deps{
 			Registration: registrationSvc,

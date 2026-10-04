@@ -127,12 +127,43 @@ paths:
                 $ref: '#/components/schemas/TokenPairResponse'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+  /v1/auth/passenger/register:
+    post:
+      tags:
+      - Auth
+      operationId: registerPassenger
+      summary: Create a passenger account (email + password)
+      description: Creates the account only. Sign in next with `/v1/auth/login`, which returns `mfaEnrollNeeded` so the passenger can set up an authenticator app.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterPassengerRequest'
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterPassengerResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: An account with this email already exists (`AUTH_EMAIL_TAKEN`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
   /v1/auth/login:
     post:
       tags:
       - Auth
       operationId: login
-      summary: Operator/staff/admin email + password login
+      summary: Email + password login (passengers, operators, staff, admins)
       description: Returns tokens directly, or an MFA challenge. When `mfaChallengeRequired` is true, finish with `/v1/auth/mfa/verify` (and `/v1/auth/mfa/enroll`
         first if `mfaEnrollNeeded`) using the `preAuthToken`.
       security: []
@@ -159,6 +190,7 @@ paths:
       - Auth
       operationId: enrollMfa
       summary: Start TOTP enrollment
+      description: The secret is saved to the account only once `/v1/auth/mfa/verify` accepts a code from it. Accounts that already have an authenticator get `409 AUTH_MFA_ALREADY_ENROLLED`.
       security: []
       requestBody:
         required: true
@@ -175,6 +207,12 @@ paths:
                 $ref: '#/components/schemas/EnrollMfaResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: An authenticator app is already set up (`AUTH_MFA_ALREADY_ENROLLED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '422':
           $ref: '#/components/responses/ValidationFailed'
   /v1/auth/mfa/verify:
@@ -1833,6 +1871,25 @@ components:
       required:
       - phone
       - code
+    RegisterPassengerRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 10
+      required:
+      - email
+      - password
+    RegisterPassengerResponse:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
     LoginRequest:
       type: object
       properties:

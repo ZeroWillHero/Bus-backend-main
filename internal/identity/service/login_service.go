@@ -156,6 +156,13 @@ type preAuthEntry struct {
 	deviceFingerprint string
 	deviceInfo        string
 	expiresAt         time.Time
+
+	// pendingMFASecret is the TOTP secret from /mfa/enroll, held here
+	// until a code generated from it verifies — so an enrollment the user
+	// abandons before adding it to their authenticator never locks them
+	// out on their next login.
+	pendingMFASecret string
+	attempts         int
 }
 
 func NewPreAuthTokenStore() *PreAuthTokenStore {
@@ -163,6 +170,11 @@ func NewPreAuthTokenStore() *PreAuthTokenStore {
 }
 
 const preAuthTokenTTL = 5 * time.Minute
+
+// maxPreAuthAttempts caps MFA codes tried against one pre-auth token, so
+// a mistyped code can be retried without letting the token be used to
+// brute-force the 6-digit code.
+const maxPreAuthAttempts = 5
 
 func (s *PreAuthTokenStore) Issue(userID, deviceFingerprint, deviceInfo string) string {
 	buf := make([]byte, 24)
@@ -193,6 +205,41 @@ func (s *PreAuthTokenStore) Peek(token string) (userID string, ok bool) {
 		return "", false
 	}
 	return e.userID, true
+}
+
+// SetPendingMFASecret attaches a not-yet-confirmed TOTP secret to token.
+func (s *PreAuthTokenStore) SetPendingMFASecret(token, secret string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, found := s.entries[token]
+	if !found || time.Now().After(e.expiresAt) {
+		return false
+	}
+	e.pendingMFASecret = secret
+	s.entries[token] = e
+	return true
+}
+
+// BeginAttempt counts one MFA code attempt against token and returns its
+// entry, or false once the token is expired or out of attempts. The count
+// is taken before the code is checked, so concurrent requests can't get
+// past the cap. A successful check must then Consume the token.
+func (s *PreAuthTokenStore) BeginAttempt(token string) (preAuthEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, found := s.entries[token]
+	if !found {
+		return preAuthEntry{}, false
+	}
+	if time.Now().After(e.expiresAt) || e.attempts >= maxPreAuthAttempts {
+		delete(s.entries, token)
+		return preAuthEntry{}, false
+	}
+	e.attempts++
+	s.entries[token] = e
+	return e, true
 }
 
 // Consume returns and deletes the entry for token — single use, per the

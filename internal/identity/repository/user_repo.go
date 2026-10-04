@@ -8,11 +8,16 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/sl-bus/backend/internal/identity/domain"
 	"github.com/sl-bus/backend/internal/platform/sqlcgen"
 )
+
+// usersEmailUniqueConstraint is Postgres's default name for the UNIQUE on
+// identity.users.email (000002_identity_schema.up.sql).
+const usersEmailUniqueConstraint = "users_email_key"
 
 // UserRepository adapts sqlcgen.Queries to domain.UserRepository. db is a
 // DBTX — either the shared pool or a specific pgx.Tx — so the same
@@ -71,6 +76,10 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User) (*domain.Us
 		MfaTotpSecret: text(u.MFATOTPSecret),
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == usersEmailUniqueConstraint {
+			return nil, domain.ErrEmailTaken
+		}
 		return nil, err
 	}
 	return toDomainUser(row), nil
