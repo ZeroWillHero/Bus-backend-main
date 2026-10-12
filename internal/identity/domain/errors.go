@@ -14,6 +14,10 @@ var (
 	ErrTokenExpired       = errors.New("identity: refresh token expired")
 	ErrUserNotFound       = errors.New("identity: user not found")
 	ErrSessionNotOwned    = errors.New("identity: session does not belong to caller")
+	ErrEmailTaken         = errors.New("identity: email already registered")
+	ErrPasswordTooShort   = errors.New("identity: password too short")
+	ErrPasswordBreached   = errors.New("identity: password appears in a known breach list")
+	ErrMFAAlreadyEnrolled = errors.New("identity: mfa already enrolled")
 
 	// ErrNotFound is the generic "no row" signal repositories return;
 	// callers translate it into a context-specific error

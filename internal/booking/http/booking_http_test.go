@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sl-bus/backend/internal/booking/domain"
 	bookinghttp "github.com/sl-bus/backend/internal/booking/http"
@@ -27,12 +29,26 @@ func (approveAll) Refund(context.Context, string, float64, string) error { retur
 
 func setup(t *testing.T) (http.Handler, *auth.JWTIssuer, string, func(q string, dst interface{}, args ...interface{})) {
 	t.Helper()
-	pool := testutil.NewTestPool(t)
-	seats := fleetrepo.NewSeatInventoryRepository(pool, nil)
+	return setupAs(t, true)
+}
+
+// setupAs builds the router over the slbus_app pool (RLS enforced) or, with
+// appRole=false, the superuser pool (RLS bypassed) to prove an authorization
+// check does not depend on RLS.
+func setupAs(t *testing.T, appRole bool) (http.Handler, *auth.JWTIssuer, string, func(q string, dst interface{}, args ...interface{})) {
+	t.Helper()
+	pool := testutil.NewTestPool(t) // superuser: seeding and assertions only
+	// The service runs as slbus_app, like production, so RLS is enforced. Running
+	// as a superuser is what hid the booking path's RLS bugs.
+	app := pool
+	if appRole {
+		app = testutil.NewAppRolePool(t)
+	}
+	seats := fleetrepo.NewSeatInventoryRepository(app, nil)
 	svc := service.NewCheckoutService(
-		bookingrepo.NewBookingRepository(pool), bookingrepo.NewBookingSeatRepository(pool),
-		bookingrepo.NewTicketRepository(pool), seats, seats, approveAll{},
-		bookingrepo.NewOutboxRepository(pool), []byte("qr"))
+		bookingrepo.NewBookingRepository(app), bookingrepo.NewBookingSeatRepository(app),
+		bookingrepo.NewTicketRepository(app), seats, seats, approveAll{},
+		bookingrepo.NewOutboxRepository(app), []byte("qr"))
 	issuer := auth.NewJWTIssuer("http-test-secret")
 	router := bookinghttp.NewRouter(bookinghttp.Deps{CheckoutService: svc, Verifier: issuer})
 
@@ -64,6 +80,40 @@ func do(t *testing.T, h http.Handler, method, path, token string, body interface
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
+}
+
+type bookingBody struct {
+	ID            string  `json:"id"`
+	Status        string  `json:"status"`
+	TotalAmount   float64 `json:"totalAmount"`
+	HoldExpiresAt string  `json:"holdExpiresAt"`
+}
+
+// decodeBooking reads the standard {success, data} envelope.
+func decodeBooking(t *testing.T, rec *httptest.ResponseRecorder) bookingBody {
+	t.Helper()
+	var env struct {
+		Success bool        `json:"success"`
+		Data    bookingBody `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || !env.Success {
+		t.Fatalf("not a success envelope (%v): %s", err, rec.Body.String())
+	}
+	return env.Data
+}
+
+func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var env struct {
+		Success bool `json:"success"`
+		Error   struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || env.Success {
+		t.Fatalf("not an error envelope (%v): %s", err, rec.Body.String())
+	}
+	return env.Error.Code
 }
 
 func tokenFor(t *testing.T, i *auth.JWTIssuer, userID string, role auth.Role) string {
@@ -118,11 +168,14 @@ func TestHTTPFareTamperingAndIdentitySpoofing(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp struct {
-		ID          string  `json:"id"`
-		TotalAmount float64 `json:"totalAmount"`
+	var env struct {
+		Data struct {
+			ID          string  `json:"id"`
+			TotalAmount float64 `json:"totalAmount"`
+		} `json:"data"`
 	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	_ = json.Unmarshal(rec.Body.Bytes(), &env)
+	resp := env.Data
 	if resp.TotalAmount != 2000 {
 		t.Errorf("totalAmount = %v, want 2000", resp.TotalAmount)
 	}
@@ -146,10 +199,7 @@ func TestHTTPBookingOwnership(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("setup: %d %s", rec.Code, rec.Body.String())
 	}
-	var resp struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	resp := decodeBooking(t, rec)
 
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/bookings/" + resp.ID},
@@ -183,33 +233,141 @@ func bookAndConfirm(t *testing.T, router http.Handler, issuer *auth.JWTIssuer, s
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create booking: %d %s", rec.Code, rec.Body.String())
 	}
-	var resp struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	resp := decodeBooking(t, rec)
 	if rec := do(t, router, "POST", "/bookings/"+resp.ID+"/confirm", passengerTok, map[string]string{"paymentRef": "pay-" + resp.ID}); rec.Code != http.StatusOK {
 		t.Fatalf("confirm booking: %d %s", rec.Code, rec.Body.String())
 	}
 	return resp.ID, passengerTok
 }
 
+func operatorTokenFor(t *testing.T, i *auth.JWTIssuer, userID, operatorID string, role auth.Role) string {
+	t.Helper()
+	tok, err := i.Issue(userID, role, operatorID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
 // operator_admin may board passengers, like operator_staff; nobody else may.
 func TestCheckInRoles(t *testing.T) {
 	router, issuer, trip, scan := setup(t)
 	bookingID, passengerTok := bookAndConfirm(t, router, issuer, scan, trip, "A1")
-	var qr string
+	var qr, op string
 	scan(`SELECT qr_token FROM booking.tickets WHERE booking_id = $1`, &qr, bookingID)
+	scan(`SELECT operator_id::text FROM fleet.trips WHERE id = $1`, &op, trip)
 	path := "/tickets/" + qr + "/check-in"
 
 	if rec := do(t, router, "POST", path, passengerTok, nil); rec.Code != http.StatusForbidden {
 		t.Errorf("passenger check-in: got %d, want 403", rec.Code)
 	}
-	admin := tokenFor(t, issuer, "44444444-4444-4444-4444-444444444444", auth.RoleOperatorAdmin)
+	admin := operatorTokenFor(t, issuer, "44444444-4444-4444-4444-444444444444", op, auth.RoleOperatorAdmin)
 	if rec := do(t, router, "POST", path, admin, nil); rec.Code != http.StatusOK {
 		t.Errorf("operator_admin check-in: got %d (%s), want 200", rec.Code, rec.Body.String())
 	}
-	staff := tokenFor(t, issuer, "55555555-5555-5555-5555-555555555555", auth.RoleOperatorStaff)
+	staff := operatorTokenFor(t, issuer, "55555555-5555-5555-5555-555555555555", op, auth.RoleOperatorStaff)
 	if rec := do(t, router, "POST", path, staff, nil); rec.Code != http.StatusConflict {
 		t.Errorf("operator_staff re-check-in: got %d, want 409 (already checked in, not 403)", rec.Code)
+	}
+}
+
+// A ticket can only be checked in by staff of the operator that runs the trip.
+// Before: any operator's staff got 200 for any operator's ticket.
+func TestCheckInIsScopedToTheTripsOperator(t *testing.T) {
+	for name, appRole := range map[string]bool{"rls": true, "no-rls": false} {
+		t.Run(name, func(t *testing.T) { checkInScopedToOperator(t, appRole) })
+	}
+}
+
+func checkInScopedToOperator(t *testing.T, appRole bool) {
+	router, issuer, trip, scan := setupAs(t, appRole)
+	bookingID, _ := bookAndConfirm(t, router, issuer, scan, trip, "A1")
+	var qr, op, other string
+	scan(`SELECT qr_token FROM booking.tickets WHERE booking_id = $1`, &qr, bookingID)
+	scan(`SELECT operator_id::text FROM fleet.trips WHERE id = $1`, &op, trip)
+	scan(`INSERT INTO ops.operators (name, business_reg_no, status) VALUES ('Other Operator', 'REG-' || gen_random_uuid()::text, 'approved') RETURNING id::text`, &other)
+	path := "/tickets/" + qr + "/check-in"
+
+	foreign := operatorTokenFor(t, issuer, "66666666-6666-6666-6666-666666666666", other, auth.RoleOperatorStaff)
+	rec := do(t, router, "POST", path, foreign, nil)
+	if rec.Code != http.StatusNotFound && rec.Code != http.StatusBadRequest {
+		t.Fatalf("another operator's staff: got %d (%s), want 404", rec.Code, rec.Body.String())
+	}
+	var checkedIn *string
+	scan(`SELECT checked_in_at::text FROM booking.tickets WHERE booking_id = $1`, &checkedIn, bookingID)
+	if checkedIn != nil {
+		t.Fatalf("ticket was checked in by another operator's staff")
+	}
+	own := operatorTokenFor(t, issuer, "77777777-7777-7777-7777-777777777777", op, auth.RoleOperatorStaff)
+	if rec := do(t, router, "POST", path, own, nil); rec.Code != http.StatusOK {
+		t.Errorf("own operator's staff: got %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+}
+
+// The booking lifecycle returns the standard envelope, a UTC hold expiry, the
+// passenger's own ticket (with the QR token), a list, and a 409 for cancelling
+// a confirmed booking.
+func TestBookingLifecycleContract(t *testing.T) {
+	router, issuer, trip, scan := setup(t)
+	var p string
+	scan("INSERT INTO identity.users (phone, role) VALUES ('+94' || substr(replace(gen_random_uuid()::text,'-',''),1,12), 'passenger') RETURNING id::text", &p)
+	tok := tokenFor(t, issuer, p, auth.RolePassenger)
+
+	rec := do(t, router, "POST", "/bookings/", tok, map[string]interface{}{"tripId": trip, "seats": []map[string]interface{}{{"seatNumber": "A1", "passengerName": "P"}}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("hold: %d %s", rec.Code, rec.Body.String())
+	}
+	b := decodeBooking(t, rec)
+	exp, err := time.Parse(time.RFC3339, b.HoldExpiresAt)
+	if err != nil || !strings.HasSuffix(b.HoldExpiresAt, "Z") {
+		t.Fatalf("holdExpiresAt %q must be RFC3339 UTC: %v", b.HoldExpiresAt, err)
+	}
+	if d := time.Until(exp); d < 8*time.Minute || d > 11*time.Minute {
+		t.Errorf("holdExpiresAt is %v from now, want about 10 minutes (timezone bug?)", d)
+	}
+
+	if rec := do(t, router, "GET", "/bookings/"+b.ID+"/ticket", tok, nil); rec.Code != http.StatusNotFound || errorCode(t, rec) != "TICKET_NOT_FOUND" {
+		t.Errorf("ticket before payment: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, router, "POST", "/bookings/"+b.ID+"/confirm", tok, map[string]string{"paymentRef": "p"}); rec.Code != http.StatusOK || decodeBooking(t, rec).Status != "confirmed" {
+		t.Fatalf("confirm: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, router, "GET", "/bookings/"+b.ID+"/ticket", tok, nil)
+	var tk struct {
+		Data struct {
+			QRToken   string `json:"qrToken"`
+			BookingID string `json:"bookingId"`
+			CheckedIn bool   `json:"checkedIn"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tk)
+	var want string
+	scan(`SELECT qr_token FROM booking.tickets WHERE booking_id = $1`, &want, b.ID)
+	if rec.Code != http.StatusOK || tk.Data.QRToken != want || tk.Data.BookingID != b.ID || tk.Data.CheckedIn {
+		t.Errorf("ticket: %d %s", rec.Code, rec.Body.String())
+	}
+	other := tokenFor(t, issuer, "88888888-8888-8888-8888-888888888888", auth.RolePassenger)
+	if rec := do(t, router, "GET", "/bookings/"+b.ID+"/ticket", other, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("someone else's ticket: got %d, want 404", rec.Code)
+	}
+
+	rec = do(t, router, "GET", "/bookings/", tok, nil)
+	var list struct {
+		Success bool          `json:"success"`
+		Data    []bookingBody `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &list)
+	if rec.Code != http.StatusOK || !list.Success || len(list.Data) != 1 || list.Data[0].ID != b.ID {
+		t.Errorf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, router, "GET", "/bookings/", other, nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list.Data) != 0 {
+		t.Errorf("another passenger sees %d bookings, want 0", len(list.Data))
+	}
+
+	if rec := do(t, router, "POST", "/bookings/"+b.ID+"/cancel", tok, nil); rec.Code != http.StatusConflict || errorCode(t, rec) != "BOOKING_NOT_CANCELLABLE" {
+		t.Errorf("cancel confirmed: %d %s, want 409 BOOKING_NOT_CANCELLABLE", rec.Code, rec.Body.String())
 	}
 }

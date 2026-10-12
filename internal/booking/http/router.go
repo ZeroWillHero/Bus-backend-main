@@ -20,8 +20,10 @@ func NewRouter(deps Deps) chi.Router {
 	// Passenger-only endpoints
 	r.Route("/bookings", func(r chi.Router) {
 		r.Use(auth.Middleware(deps.Verifier), auth.RequireRole(auth.RolePassenger))
+		r.Get("/", NewListBookingsHandler(deps.CheckoutService))
 		r.Post("/", NewCreateBookingHandler(deps.CheckoutService))
 		r.Get("/{id}", NewGetBookingHandler(deps.CheckoutService))
+		r.Get("/{id}/ticket", NewGetTicketHandler(deps.CheckoutService))
 		r.Post("/{id}/confirm", NewConfirmBookingHandler(deps.CheckoutService))
 		r.Post("/{id}/cancel", NewCancelBookingHandler(deps.CheckoutService))
 	})

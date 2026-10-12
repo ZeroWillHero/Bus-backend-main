@@ -2,15 +2,13 @@ package service
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/sl-bus/backend/internal/identity/domain"
 	"github.com/sl-bus/backend/internal/platform/auth"
+	"github.com/sl-bus/backend/internal/platform/ratelimit"
 )
 
 // LockoutBaseDelay is the base of the exponential backoff applied after
@@ -41,7 +39,8 @@ type LoginService struct {
 	trustedRepo    domain.TrustedDeviceRepository
 	breachChecker  auth.PasswordBreachChecker
 	operatorStatus OperatorStatusChecker
-	preAuth        *PreAuthTokenStore
+	preAuth        PreAuthStore
+	mfaFailures    ratelimit.Counter
 	tokens         *TokenIssuer
 }
 
@@ -50,7 +49,8 @@ func NewLoginService(
 	trustedRepo domain.TrustedDeviceRepository,
 	breachChecker auth.PasswordBreachChecker,
 	operatorStatus OperatorStatusChecker,
-	preAuth *PreAuthTokenStore,
+	preAuth PreAuthStore,
+	mfaFailures ratelimit.Counter,
 	tokens *TokenIssuer,
 ) *LoginService {
 	return &LoginService{
@@ -59,6 +59,7 @@ func NewLoginService(
 		breachChecker:  breachChecker,
 		operatorStatus: operatorStatus,
 		preAuth:        preAuth,
+		mfaFailures:    mfaFailures,
 		tokens:         tokens,
 	}
 }
@@ -113,10 +114,21 @@ func (s *LoginService) Login(ctx context.Context, email, password, deviceFingerp
 		return &LoginResult{Tokens: tokens}, nil
 	}
 
+	// A correct password must not reopen the second factor to guessing once
+	// the account has burned through its MFA failure budget.
+	if locked, err := mfaLocked(ctx, s.mfaFailures, user.ID); err != nil {
+		return nil, err
+	} else if locked {
+		return nil, domain.ErrAccountLocked
+	}
+
 	if user.MFATOTPSecret == "" {
 		// Mandatory-MFA role that hasn't enrolled yet (e.g. right after
 		// self-registration) — caller must hit /auth/mfa/enroll next.
-		preAuth := s.preAuth.Issue(user.ID, deviceFingerprint, deviceInfo)
+		preAuth, err := s.preAuth.Issue(ctx, user.ID, deviceFingerprint, deviceInfo)
+		if err != nil {
+			return nil, err
+		}
 		return &LoginResult{MFAChallenge: true, PreAuthToken: preAuth, MFAEnrollNeeded: true}, nil
 	}
 
@@ -134,80 +146,12 @@ func (s *LoginService) Login(ctx context.Context, email, password, deviceFingerp
 		}
 	}
 
-	preAuth := s.preAuth.Issue(user.ID, deviceFingerprint, deviceInfo)
+	preAuth, err := s.preAuth.Issue(ctx, user.ID, deviceFingerprint, deviceInfo)
+	if err != nil {
+		return nil, err
+	}
 	return &LoginResult{MFAChallenge: true, PreAuthToken: preAuth}, nil
 }
 
 // ErrOperatorSuspended surfaces as OPS_OPERATOR_SUSPENDED at the HTTP layer.
 var ErrOperatorSuspended = errors.New("identity: operator suspended")
-
-// PreAuthTokenStore holds short-lived, single-use, in-memory tokens that
-// carry a user through the gap between "password verified" and "MFA
-// verified." In-memory is sufficient for a single API instance — flagged
-// as a follow-up if the service ever scales horizontally without sticky
-// sessions (would need a shared store, e.g. Redis).
-type PreAuthTokenStore struct {
-	mu      sync.Mutex
-	entries map[string]preAuthEntry
-}
-
-type preAuthEntry struct {
-	userID            string
-	deviceFingerprint string
-	deviceInfo        string
-	expiresAt         time.Time
-}
-
-func NewPreAuthTokenStore() *PreAuthTokenStore {
-	return &PreAuthTokenStore{entries: make(map[string]preAuthEntry)}
-}
-
-const preAuthTokenTTL = 5 * time.Minute
-
-func (s *PreAuthTokenStore) Issue(userID, deviceFingerprint, deviceInfo string) string {
-	buf := make([]byte, 24)
-	_, _ = rand.Read(buf)
-	token := base64.RawURLEncoding.EncodeToString(buf)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.entries[token] = preAuthEntry{
-		userID:            userID,
-		deviceFingerprint: deviceFingerprint,
-		deviceInfo:        deviceInfo,
-		expiresAt:         time.Now().Add(preAuthTokenTTL),
-	}
-	return token
-}
-
-// Peek reads the entry for token without consuming it — used by MFA
-// enrollment, which must happen using the pre-auth token (no access token
-// exists yet at that point) without invalidating it before the
-// subsequent /mfa/verify call.
-func (s *PreAuthTokenStore) Peek(token string) (userID string, ok bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	e, found := s.entries[token]
-	if !found || time.Now().After(e.expiresAt) {
-		return "", false
-	}
-	return e.userID, true
-}
-
-// Consume returns and deletes the entry for token — single use, per the
-// pre-auth token's purpose.
-func (s *PreAuthTokenStore) Consume(token string) (userID, deviceFingerprint, deviceInfo string, ok bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	e, found := s.entries[token]
-	if !found {
-		return "", "", "", false
-	}
-	delete(s.entries, token)
-	if time.Now().After(e.expiresAt) {
-		return "", "", "", false
-	}
-	return e.userID, e.deviceFingerprint, e.deviceInfo, true
-}

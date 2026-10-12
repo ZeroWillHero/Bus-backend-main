@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 
 	bookingrepo "github.com/sl-bus/backend/internal/booking/repository"
 	financerepository "github.com/sl-bus/backend/internal/finance/repository"
@@ -21,6 +22,7 @@ import (
 	fleetrepo "github.com/sl-bus/backend/internal/fleet/repository"
 	"github.com/sl-bus/backend/internal/platform/db"
 	"github.com/sl-bus/backend/internal/platform/outbox"
+	"github.com/sl-bus/backend/internal/platform/sms"
 )
 
 func main() {
@@ -32,9 +34,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	dsn := os.Getenv("DATABASE_URL")
+	// The outbox is write-only for the API's slbus_app role (RLS denies SELECT and
+	// UPDATE), so the relay needs a privileged connection: WORKER_DATABASE_URL,
+	// falling back to DATABASE_URL for local setups that use one superuser.
+	dsn := os.Getenv("WORKER_DATABASE_URL")
 	if dsn == "" {
-		logger.Error("DATABASE_URL is required (remote Supabase connection string; see .env.example)")
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		logger.Error("WORKER_DATABASE_URL or DATABASE_URL is required (see .env.example)")
 		os.Exit(1)
 	}
 	pool, err := db.NewPool(ctx, dsn)
@@ -80,6 +88,36 @@ func main() {
 		},
 	}
 
+	// SMS credit monitor: an exhausted SMSlenz balance silently breaks SMS
+	// sign-in codes, so warn well before it runs out.
+	// Each check also refreshes the Redis cache the admin dashboard reads.
+	_, smsClient, smsErr := sms.FromEnv()
+	if smsErr != nil {
+		logger.Warn("sms balance monitor disabled", "error", smsErr)
+	}
+	redisClient := redis.NewClient(&redis.Options{Addr: getenv("REDIS_ADDR", "localhost:6379")})
+	defer func() { _ = redisClient.Close() }()
+	smsBalance := sms.NewBalanceService(smsClient, redisClient)
+	smsPolicy := sms.BalancePolicyFromEnv()
+	smsBalanceTicker := time.NewTicker(30 * time.Minute)
+	defer smsBalanceTicker.Stop()
+	checkSMSBalance := func() {
+		if smsClient == nil {
+			return
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		snap, stale, err := smsBalance.Get(checkCtx, true)
+		if err != nil || stale {
+			logger.Error("sms balance check failed", "error", err, "stale", stale)
+			return
+		}
+		if smsPolicy.IsLow(snap) {
+			logger.Error("ALERT: sms credit low or account inactive", "status", snap.Status, "balance_lkr", snap.MainBalanceLKR, "threshold_lkr", smsPolicy.LowThresholdLKR)
+		}
+	}
+	checkSMSBalance()
+
 	logger.Info("worker started (Phase 3: seat-hold cleanup + outbox relay)")
 
 	for {
@@ -95,6 +133,9 @@ func main() {
 			} else if releasedCount > 0 {
 				logger.Info("seat-hold cleanup swept", "released_count", releasedCount)
 			}
+
+		case <-smsBalanceTicker.C:
+			checkSMSBalance()
 
 		case <-relayTicker.C:
 			stats, err := relay.RunOnce(ctx)
@@ -117,4 +158,11 @@ func bookingHandler(fn func(ctx context.Context, bookingID string, payload map[s
 		}
 		return fn(ctx, bookingID, payload)
 	}
+}
+
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

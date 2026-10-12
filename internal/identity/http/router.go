@@ -13,11 +13,11 @@ import (
 )
 
 type Deps struct {
-	OTP      *service.OTPService
-	Login    *service.LoginService
-	MFA      *service.MFAService
-	Tokens   *service.TokenService
-	Verifier auth.Verifier
+	PassengerRegistration *service.PassengerRegistrationService
+	Login                 *service.LoginService
+	MFA                   *service.MFAService
+	Tokens                *service.TokenService
+	Verifier              auth.Verifier
 }
 
 // NewRouter mounts every identity endpoint except /register (see package
@@ -26,8 +26,7 @@ func NewRouter(deps Deps) chi.Router {
 	h := &handlers{deps: deps}
 	r := chi.NewRouter()
 
-	r.Post("/otp/request", h.requestOTP)
-	r.Post("/otp/verify", h.verifyOTP)
+	r.Post("/passenger/register", h.registerPassenger)
 	r.Post("/login", h.login)
 	r.Post("/mfa/enroll", h.enrollMFA)
 	r.Post("/mfa/verify", h.verifyMFA)

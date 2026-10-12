@@ -65,6 +65,15 @@ func WithTenantContext(ctx context.Context, pool *pgxpool.Pool, claims *auth.Cla
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL "app.current_role" = '%s'`, claims.Role)); err != nil {
 		return fmt.Errorf("db: set current_role: %w", err)
 	}
+	// Booking policies match the passenger by user id; Subject comes from a
+	// verified JWT, and anything that is not a uuid becomes the zero uuid.
+	userID := zeroUUID
+	if _, perr := uuid.Parse(claims.Subject); perr == nil {
+		userID = claims.Subject
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL "app.current_user_id" = '%s'`, userID)); err != nil {
+		return fmt.Errorf("db: set current_user_id: %w", err)
+	}
 
 	if err := fn(ctx, tx); err != nil {
 		return err

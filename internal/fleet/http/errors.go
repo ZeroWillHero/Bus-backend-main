@@ -23,6 +23,8 @@ func writeDomainError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.APIError{Code: "FLEET_OPERATOR_MISMATCH", Message: "The selected bus and route must belong to your operator."}, nil)
 	case domain.ErrInvalidTripStatusTransition:
 		httpx.WriteError(w, http.StatusConflict, httpx.APIError{Code: "FLEET_INVALID_TRIP_STATUS_TRANSITION", Message: "That status change isn't allowed from the trip's current state."}, nil)
+	case domain.ErrBusHasNoSeatMap:
+		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.APIError{Code: "FLEET_BUS_HAS_NO_SEAT_MAP", Message: "Draw this bus's seat map before scheduling trips on it."}, nil)
 	case domain.ErrEmptySeatMap, domain.ErrDuplicateSeatNumber, domain.ErrInvalidSeatMap:
 		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.APIError{Code: "FLEET_INVALID_SEAT_MAP", Message: "That seat map isn't valid."}, nil)
 	case domain.ErrNotFound:

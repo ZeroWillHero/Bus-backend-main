@@ -6,32 +6,63 @@ import (
 
 	"github.com/sl-bus/backend/internal/identity/domain"
 	"github.com/sl-bus/backend/internal/platform/auth"
+	"github.com/sl-bus/backend/internal/platform/ratelimit"
 )
+
+// MaxMFAFailures is how many wrong second-factor codes an account may
+// submit within MFAFailureWindow, across all pre-auth tokens, before MFA
+// (and therefore login) is refused until the window ends. The per-token cap
+// alone isn't enough: a caller who knows the password can mint a fresh
+// token for every 5 guesses.
+const (
+	MaxMFAFailures   = 10
+	MFAFailureWindow = 24 * time.Hour
+)
+
+func mfaFailureKey(userID string) string { return "mfa_fail:" + userID }
+
+func mfaLocked(ctx context.Context, failures ratelimit.Counter, userID string) (bool, error) {
+	n, err := failures.Count(ctx, mfaFailureKey(userID))
+	if err != nil {
+		return false, err
+	}
+	return n >= MaxMFAFailures, nil
+}
 
 type MFAService struct {
 	userRepo    domain.UserRepository
 	trustedRepo domain.TrustedDeviceRepository
-	preAuth     *PreAuthTokenStore
+	preAuth     PreAuthStore
+	failures    ratelimit.Counter
 	tokens      *TokenIssuer
 }
 
-func NewMFAService(userRepo domain.UserRepository, trustedRepo domain.TrustedDeviceRepository, preAuth *PreAuthTokenStore, tokens *TokenIssuer) *MFAService {
-	return &MFAService{userRepo: userRepo, trustedRepo: trustedRepo, preAuth: preAuth, tokens: tokens}
+func NewMFAService(userRepo domain.UserRepository, trustedRepo domain.TrustedDeviceRepository, preAuth PreAuthStore, failures ratelimit.Counter, tokens *TokenIssuer) *MFAService {
+	return &MFAService{userRepo: userRepo, trustedRepo: trustedRepo, preAuth: preAuth, failures: failures, tokens: tokens}
 }
 
-// EnrollMFA generates a TOTP secret and stores it for the user identified
-// by preAuthToken — called once, right after a mandatory-MFA role's first
+// EnrollMFA generates a TOTP secret for the user identified by
+// preAuthToken — called once, right after a mandatory-MFA role's first
 // login attempt returns mfaEnrollNeeded=true. It reads (Peek, not
 // Consume) the pre-auth token, since the same token is still needed for
-// the /mfa/verify call that completes login.
+// the /mfa/verify call that completes login. The secret is only saved to
+// the account once that call verifies a code from it, and an account that
+// already has one can't enroll again: otherwise the password alone would
+// be enough to replace the authenticator.
 func (s *MFAService) EnrollMFA(ctx context.Context, preAuthToken string) (secret, provisioningURI string, err error) {
-	userID, ok := s.preAuth.Peek(preAuthToken)
+	userID, ok, err := s.preAuth.Peek(ctx, preAuthToken)
+	if err != nil {
+		return "", "", err
+	}
 	if !ok {
 		return "", "", domain.ErrTokenInvalid
 	}
 	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
 		return "", "", err
+	}
+	if user.MFATOTPSecret != "" {
+		return "", "", domain.ErrMFAAlreadyEnrolled
 	}
 	accountLabel := user.Email
 	if accountLabel == "" {
@@ -41,35 +72,73 @@ func (s *MFAService) EnrollMFA(ctx context.Context, preAuthToken string) (secret
 	if err != nil {
 		return "", "", err
 	}
-	if err := s.userRepo.SetMFASecret(ctx, userID, secret); err != nil {
+	set, err := s.preAuth.SetPendingMFASecret(ctx, preAuthToken, secret)
+	if err != nil {
 		return "", "", err
+	}
+	if !set {
+		return "", "", domain.ErrTokenInvalid
 	}
 	return secret, provisioningURI, nil
 }
 
 // VerifyMFA completes a login's MFA challenge: validates totpCode against
-// the pre-auth token issued by LoginService, marks the device trusted for
-// 30 days (unless the role is excluded, FR-AUTH-4), and issues full
-// tokens.
+// the pre-auth token issued by LoginService (finishing enrollment if one
+// is pending), marks the device trusted for 30 days (unless the role is
+// excluded, FR-AUTH-4), and issues full tokens. A wrong code leaves the
+// token usable for up to maxPreAuthAttempts tries in total, and counts
+// towards the account's MaxMFAFailures.
 func (s *MFAService) VerifyMFA(ctx context.Context, preAuthToken, totpCode string) (*TokenPair, error) {
-	userID, deviceFingerprint, deviceInfo, ok := s.preAuth.Consume(preAuthToken)
-	if !ok {
-		return nil, domain.ErrTokenInvalid
-	}
-
-	user, err := s.userRepo.FindByID(ctx, userID)
+	attempt, ok, err := s.preAuth.BeginAttempt(ctx, preAuthToken)
 	if err != nil {
 		return nil, err
 	}
-	if user.MFATOTPSecret == "" || !auth.VerifyTOTPCode(user.MFATOTPSecret, totpCode) {
-		return nil, domain.ErrInvalidMFACode
+	if !ok {
+		return nil, domain.ErrTokenInvalid
+	}
+	if locked, err := mfaLocked(ctx, s.failures, attempt.UserID); err != nil {
+		return nil, err
+	} else if locked {
+		return nil, domain.ErrAccountLocked
 	}
 
-	if domain.TrustedDeviceEligible(user.Role) && deviceFingerprint != "" {
-		if _, err := s.trustedRepo.Upsert(ctx, user.ID, deviceFingerprint, time.Now().Add(domain.TrustedDeviceWindow)); err != nil {
+	user, err := s.userRepo.FindByID(ctx, attempt.UserID)
+	if err != nil {
+		return nil, err
+	}
+	secret := user.MFATOTPSecret
+	enrolling := secret == ""
+	if enrolling {
+		secret = attempt.PendingMFASecret
+	}
+	if secret == "" || !auth.VerifyTOTPCode(secret, totpCode) {
+		if _, err := s.failures.Incr(ctx, mfaFailureKey(user.ID), MFAFailureWindow); err != nil {
+			return nil, err
+		}
+		return nil, domain.ErrInvalidMFACode
+	}
+	// Single use: a concurrent request that verified the same code first
+	// has already consumed the token.
+	if _, ok, err := s.preAuth.Consume(ctx, preAuthToken); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, domain.ErrTokenInvalid
+	}
+	if err := s.failures.Reset(ctx, mfaFailureKey(user.ID)); err != nil {
+		return nil, err
+	}
+
+	if enrolling {
+		if err := s.userRepo.SetMFASecret(ctx, user.ID, secret); err != nil {
 			return nil, err
 		}
 	}
 
-	return s.tokens.IssuePair(ctx, user, deviceInfo)
+	if domain.TrustedDeviceEligible(user.Role) && attempt.DeviceFingerprint != "" {
+		if _, err := s.trustedRepo.Upsert(ctx, user.ID, attempt.DeviceFingerprint, time.Now().Add(domain.TrustedDeviceWindow)); err != nil {
+			return nil, err
+		}
+	}
+
+	return s.tokens.IssuePair(ctx, user, attempt.DeviceInfo)
 }

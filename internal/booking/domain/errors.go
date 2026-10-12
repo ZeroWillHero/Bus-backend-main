@@ -12,4 +12,6 @@ var (
 	ErrUnknownSeat             = errors.New("seat does not exist on this trip or trip is not bookable")
 	ErrDuplicateSeat           = errors.New("the same seat was selected more than once")
 	ErrNoSeatsSelected         = errors.New("no seats selected")
+	ErrPaymentDeclined         = errors.New("payment declined")
+	ErrTicketNotFound          = errors.New("ticket not found")
 )

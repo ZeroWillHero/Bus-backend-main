@@ -208,7 +208,7 @@ func (s *CheckoutService) ConfirmBooking(ctx context.Context, actorID, bookingID
 
 	if !result.Approved {
 		// Payment declined; booking stays held for retry
-		return booking, fmt.Errorf("payment declined: %s", result.ErrorMessage)
+		return booking, fmt.Errorf("%w: %s", domain.ErrPaymentDeclined, result.ErrorMessage)
 	}
 
 	// Payment succeeded; confirm seats and booking
@@ -309,18 +309,54 @@ func (s *CheckoutService) GetBooking(ctx context.Context, actorID, bookingID str
 	return s.loadOwned(ctx, bookingID, actorID)
 }
 
-// CheckIn marks a ticket as checked in using the QR token
-func (s *CheckoutService) CheckIn(ctx context.Context, qrToken string) (*domain.Ticket, error) {
+// CheckIn marks a ticket as checked in using the QR token. operatorID is the
+// caller's operator (from the verified JWT): a ticket is only visible to staff
+// of the operator that runs its trip, so another operator's ticket reads as
+// "not found" rather than being checked in or confirmed to exist.
+func (s *CheckoutService) CheckIn(ctx context.Context, operatorID, qrToken string) (*domain.Ticket, error) {
 	ticket, err := s.ticketRepo.FindByQRToken(ctx, qrToken)
 	if err != nil {
 		return nil, domain.ErrInvalidQRToken
+	}
+	if !domain.VerifyQRToken(qrToken, ticket.BookingID, s.qrTokenSecret) {
+		return nil, domain.ErrInvalidQRToken
+	}
+
+	// Authorise before revealing anything else about the ticket (e.g. whether
+	// it was already used). Under RLS another operator's booking is invisible
+	// (not found); with a role that bypasses RLS the explicit comparison below
+	// is what stops them. Either way the answer is the same.
+	booking, err := s.bookingRepo.FindByID(ctx, ticket.BookingID)
+	if err != nil {
+		return nil, domain.ErrTicketNotFound
+	}
+	tripOperatorID, err := s.pricing.TripOperatorID(ctx, booking.TripID)
+	if err != nil || operatorID == "" || tripOperatorID != operatorID {
+		return nil, domain.ErrTicketNotFound
 	}
 
 	if ticket.CheckedInAt != nil {
 		return nil, domain.ErrAlreadyCheckedIn
 	}
-
 	return s.ticketRepo.MarkCheckedIn(ctx, ticket.ID)
+}
+
+// GetTicket returns the passenger's own ticket (with the QR token to show at
+// boarding). A booking that is not theirs, or has no ticket yet, is not found.
+func (s *CheckoutService) GetTicket(ctx context.Context, actorID, bookingID string) (*domain.Ticket, error) {
+	if _, err := s.loadOwned(ctx, bookingID, actorID); err != nil {
+		return nil, err
+	}
+	ticket, err := s.ticketRepo.FindByBookingID(ctx, bookingID)
+	if err != nil {
+		return nil, domain.ErrTicketNotFound
+	}
+	return ticket, nil
+}
+
+// ListBookings returns the passenger's own bookings, newest first.
+func (s *CheckoutService) ListBookings(ctx context.Context, actorID, cursor string, limit int) ([]*domain.Booking, string, error) {
+	return s.bookingRepo.FindByPassenger(ctx, actorID, cursor, limit)
 }
 
 func pointerTo[T any](v T) *T {

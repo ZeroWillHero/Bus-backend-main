@@ -2,20 +2,24 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sl-bus/backend/internal/platform/db"
 
 	"github.com/sl-bus/backend/internal/booking/domain"
 )
 
 type BookingRepository struct {
-	pool *pgxpool.Pool
+	pool db.Querier
 }
 
 func NewBookingRepository(pool *pgxpool.Pool) *BookingRepository {
-	return &BookingRepository{pool: pool}
+	return &BookingRepository{pool: db.NewScoped(pool, db.ScopeCaller)}
 }
 
 func (r *BookingRepository) Create(ctx context.Context, b *domain.Booking) (*domain.Booking, error) {
@@ -49,6 +53,9 @@ func (r *BookingRepository) FindByID(ctx context.Context, id string) (*domain.Bo
 		id,
 	).Scan(&b.ID, &b.TripID, &b.PassengerID, &b.Status, &b.TotalAmount, &b.Currency, &b.HoldExpiresAt,
 		&b.CreatedAt, &b.UpdatedAt, &b.ConfirmedAt, &b.CancelledAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrBookingNotFound // absent, or hidden from this caller by RLS
+	}
 	if err != nil {
 		return nil, fmt.Errorf("find_by_id: %w", err)
 	}

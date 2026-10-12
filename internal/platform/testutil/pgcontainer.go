@@ -65,6 +65,29 @@ func NewTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// NewAppRolePool returns a pool connected as slbus_app, the non-superuser role
+// the API runs as in production, so Row-Level Security is enforced. Use it for
+// the code under test and NewTestPool (superuser) to seed data.
+func NewAppRolePool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	super := NewTestPool(t)
+	cfg := super.Config().Copy()
+	cfg.ConnConfig.User = "slbus_app"
+	cfg.ConnConfig.Password = "slbus_app"
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open slbus_app pool: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("connect as slbus_app: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
 func startSharedContainer() (string, error) {
 	ctx := context.Background()
 	c, err := postgres.Run(ctx, "postgres:18",
