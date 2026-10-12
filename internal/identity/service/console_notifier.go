@@ -1,3 +1,8 @@
+//go:build legacy_otp
+
+// Excluded from the build with the legacy OTP flow; it logged OTP codes in
+// plain text. Dev SMS now goes through platform/sms.ConsoleSender.
+
 package service
 
 import (

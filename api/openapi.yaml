@@ -6,9 +6,8 @@ info:
   description: 'Backend API for SL-Bus.
 
 
-    **Response format.** Most endpoints reply with an envelope: `{ "success": true, "data": ..., "meta": ... }` on success and `{ "success": false,
-    "error": { "code", "message", "fields?" } }` on failure. Paginated lists put `nextCursor` and `hasMore` in `meta`. The **booking and ticket
-    endpoints are the exception**: they return the bare object and a bare `{code, message}` error. Each is marked in its description.
+    **Response format.** Every endpoint replies with an envelope: `{ "success": true, "data": ..., "meta": ... }` on success and `{ "success": false,
+    "error": { "code", "message", "fields?" } }` on failure. Paginated lists put `nextCursor` and `hasMore` in `meta`.
 
 
     **Authentication.** Send `Authorization: Bearer <accessToken>`. Tokens come from the `/v1/auth/*` endpoints. Each protected endpoint lists
@@ -26,6 +25,7 @@ tags:
 - name: Platform
 - name: Auth
 - name: Operators (admin)
+- name: Platform admin
 - name: Operator insights
 - name: Fleet
 - name: Search
@@ -79,52 +79,6 @@ paths:
                 $ref: '#/components/schemas/RegisterOperatorResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
-        '422':
-          $ref: '#/components/responses/ValidationFailed'
-  /v1/auth/otp/request:
-    post:
-      tags:
-      - Auth
-      operationId: requestOtp
-      summary: Request a login OTP for a passenger phone number
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RequestOtpRequest'
-      responses:
-        '202':
-          description: OTP sent
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/EmptyResponse'
-        '422':
-          $ref: '#/components/responses/ValidationFailed'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /v1/auth/otp/verify:
-    post:
-      tags:
-      - Auth
-      operationId: verifyOtp
-      summary: Verify an OTP and sign in
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/VerifyOtpRequest'
-      responses:
-        '200':
-          description: Signed in
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TokenPairResponse'
         '422':
           $ref: '#/components/responses/ValidationFailed'
   /v1/auth/passenger/register:
@@ -352,6 +306,39 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /v1/admin/sms/balance:
+    get:
+      tags:
+      - Platform admin
+      operationId: getSmsBalance
+      summary: SMS provider credit balance
+      description: '**Roles:** `platform_admin`. Served from a 60-second cache shared with the worker''s periodic check. `refresh=true` forces a live check (at most once per 15 s per admin; otherwise served from cache). If SMSlenz can''t be reached, the last known balance is returned with `stale: true`; with nothing cached the response is 503 `PLATFORM_SMS_PROVIDER_UNAVAILABLE`. Never includes provider credentials.'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: refresh
+        in: query
+        required: false
+        description: Force a live check instead of the cached value.
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: Current (or last known) balance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SmsBalanceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: SMS provider unreachable and no cached balance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /v1/operators/me:
     get:
       tags:
@@ -1019,7 +1006,7 @@ paths:
       operationId: createTrips
       summary: Schedule one trip or a recurring series
       description: 'Provide either `departureAt` (one trip) or `recurrence` (many). The bus and route must belong to the caller''s operator, and
-        the operator must be approved.
+        the operator must be approved. The bus must already have a seat map (`FLEET_BUS_HAS_NO_SEAT_MAP`, 422, otherwise).
 
 
         **Roles:** `operator_admin`, `platform_admin`'
@@ -1296,16 +1283,46 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
   /v1/bookings:
+    get:
+      tags:
+      - Bookings
+      operationId: listBookings
+      summary: List the caller's own bookings, newest first
+      description: '**Roles:** `passenger`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        description: Page size, 1-100 (default 20).
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+      - name: cursor
+        in: query
+        required: false
+        description: '`meta.nextCursor` from the previous page.'
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
     post:
       tags:
       - Bookings
       operationId: createBooking
       summary: Hold seats and create a booking
       description: 'Fares are recomputed server-side; any `fareAmount` sent by the client is ignored. The hold expires at `holdExpiresAt`.
-
-
-        **Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object, and errors
-        are a bare `{code, message}` (`BookingError`).
 
 
         **Roles:** `passenger`'
@@ -1323,13 +1340,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Booking'
+                $ref: '#/components/schemas/BookingEnvelope'
         '400':
           description: Malformed body
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
         '401':
           description: Missing or invalid token
           content:
@@ -1341,21 +1358,51 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
         '422':
           description: '`VALIDATION_FAILED` (unknown/duplicate/no seats)'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
   /v1/bookings/{id}:
     get:
       tags:
       - Bookings
       operationId: getBooking
       summary: Get one of the caller's bookings
-      description: '**Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object,
-        and errors are a bare `{code, message}` (`BookingError`).
+      description: '**Roles:** `passenger`'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Booking id
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingEnvelope'
+        '404':
+          description: '`BOOKING_NOT_FOUND` (also returned for bookings owned by someone else)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /v1/bookings/{id}/ticket:
+    get:
+      tags:
+      - Bookings
+      operationId: getBookingTicket
+      summary: Get the ticket (with QR token) for one of the caller's confirmed bookings
+      description: '`qrToken` is what the passenger shows at boarding; staff submit it to the check-in endpoint. A booking that is not
+        the caller''s, or has no ticket yet (not paid), is reported as not found.
 
 
         **Roles:** `passenger`'
@@ -1375,24 +1422,22 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Booking'
+                $ref: '#/components/schemas/TicketEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
-          description: '`BOOKING_NOT_FOUND` (also returned for bookings owned by someone else)'
+          description: '`BOOKING_NOT_FOUND` or `TICKET_NOT_FOUND`'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
   /v1/bookings/{id}/confirm:
     post:
       tags:
       - Bookings
       operationId: confirmBooking
       summary: Confirm a held booking with a payment reference
-      description: '**Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object,
-        and errors are a bare `{code, message}` (`BookingError`).
-
-
-        **Roles:** `passenger`'
+      description: '**Roles:** `passenger`'
       security:
       - bearerAuth: []
       parameters:
@@ -1415,36 +1460,38 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Booking'
+                $ref: '#/components/schemas/BookingEnvelope'
         '402':
           description: '`PAYMENT_DECLINED`'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
         '404':
           description: '`BOOKING_NOT_FOUND`'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`BOOKING_INVALID_STATE` (not in the held state)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '410':
           description: '`BOOKING_HOLD_EXPIRED`'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
   /v1/bookings/{id}/cancel:
     post:
       tags:
       - Bookings
       operationId: cancelBooking
       summary: Cancel a booking
-      description: '**Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object,
-        and errors are a bare `{code, message}` (`BookingError`).
-
-
-        **Roles:** `passenger`'
+      description: '**Roles:** `passenger`'
       security:
       - bearerAuth: []
       parameters:
@@ -1461,24 +1508,27 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Booking'
+                $ref: '#/components/schemas/BookingEnvelope'
         '404':
           description: '`BOOKING_NOT_FOUND`'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`BOOKING_NOT_CANCELLABLE`. Only held bookings can be cancelled; a confirmed booking is final until a refund
+            policy exists.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /v1/tickets/{qrToken}/check-in:
     post:
       tags:
       - Tickets
       operationId: checkInTicket
       summary: Check a passenger in by QR token
-      description: '**Note:** the booking endpoints do not use the standard `{success, data}` envelope. Success responses are the bare object,
-        and errors are a bare `{code, message}` (`BookingError`).
-
-
-        **Roles:** `operator_staff`, `operator_admin`'
+      description: '**Roles:** `operator_staff`, `operator_admin`'
       security:
       - bearerAuth: []
       parameters:
@@ -1493,25 +1543,25 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CheckInResult'
+                $ref: '#/components/schemas/CheckInEnvelope'
         '400':
           description: '`INVALID_QR_TOKEN`'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
         '404':
-          description: '`TICKET_NOT_FOUND`'
+          description: '`TICKET_NOT_FOUND`. Also returned for a ticket that belongs to another operator''s trip.'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
         '409':
           description: '`TICKET_ALREADY_CHECKED_IN`'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BookingError'
+                $ref: '#/components/schemas/ErrorEnvelope'
   /v1/ws/trips/{tripID}/seats:
     get:
       tags:
@@ -1713,17 +1763,6 @@ components:
       required:
       - success
       - error
-    BookingError:
-      type: object
-      properties:
-        code:
-          type: string
-          example: BOOKING_NOT_FOUND
-        message:
-          type: string
-      required:
-      - code
-      description: Bare error body used by the booking endpoints (no envelope). Some responses may have an empty or plain-text body.
     EmptyData:
       type: object
       properties: {}
@@ -1853,24 +1892,6 @@ components:
       required:
       - success
       - data
-    RequestOtpRequest:
-      type: object
-      properties:
-        phone:
-          type: string
-          example: '+94771234567'
-      required:
-      - phone
-    VerifyOtpRequest:
-      type: object
-      properties:
-        phone:
-          type: string
-        code:
-          type: string
-      required:
-      - phone
-      - code
     RegisterPassengerRequest:
       type: object
       properties:
@@ -2061,6 +2082,74 @@ components:
       - businessRegNo
       - status
       - createdAt
+    SmsBalanceResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/SmsBalance'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    SmsBalance:
+      type: object
+      properties:
+        provider:
+          type: string
+          example: smslenz
+        status:
+          type: string
+          description: Provider account status; anything other than `active` means sends will fail.
+          example: active
+        mainBalanceLkr:
+          type: number
+          example: 924.45
+        estimatedSmsRemaining:
+          type: integer
+          description: Single-segment messages the main balance buys at `unitPriceLkr`.
+          example: 1566
+        unitPriceLkr:
+          type: number
+          example: 0.59
+        lowBalanceThresholdLkr:
+          type: number
+          example: 500
+        isLow:
+          type: boolean
+          description: True when the balance is below the threshold or the account isn't active.
+        senderBalances:
+          type: array
+          items:
+            type: object
+            properties:
+              senderId:
+                type: string
+              balanceLkr:
+                type: number
+            required:
+            - senderId
+            - balanceLkr
+        checkedAt:
+          type: string
+          format: date-time
+        stale:
+          type: boolean
+          description: True when the provider couldn't be reached and this is the last known value.
+      required:
+      - provider
+      - status
+      - mainBalanceLkr
+      - estimatedSmsRemaining
+      - unitPriceLkr
+      - lowBalanceThresholdLkr
+      - isLow
+      - senderBalances
+      - checkedAt
+      - stale
     OperatorResponse:
       type: object
       properties:
@@ -3010,15 +3099,114 @@ components:
         totalAmount:
           type: number
           format: double
+        passengerId:
+          type: string
+          format: uuid
+        currency:
+          type: string
+          example: LKR
         holdExpiresAt:
           type: string
           format: date-time
-          description: Present while status is `held`.
+          description: UTC (RFC 3339, `Z`). Present while status is `held`.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        confirmedAt:
+          type: string
+          format: date-time
+        cancelledAt:
+          type: string
+          format: date-time
       required:
       - id
       - tripId
+      - passengerId
       - status
       - totalAmount
+      - currency
+      - createdAt
+      - updatedAt
+    BookingEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/Booking'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    BookingListEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Booking'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+      required:
+      - success
+      - data
+    Ticket:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bookingId:
+          type: string
+          format: uuid
+        qrToken:
+          type: string
+          description: Shown as a QR code at boarding.
+        issuedAt:
+          type: string
+          format: date-time
+        checkedIn:
+          type: boolean
+      required:
+      - id
+      - bookingId
+      - qrToken
+      - issuedAt
+      - checkedIn
+    TicketEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/Ticket'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
+    CheckInEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Always `true`.
+        data:
+          $ref: '#/components/schemas/CheckInResult'
+        meta:
+          $ref: '#/components/schemas/Meta'
+      required:
+      - success
+      - data
     BookingSeatRequest:
       type: object
       properties:

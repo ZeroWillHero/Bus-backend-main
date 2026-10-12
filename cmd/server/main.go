@@ -31,9 +31,12 @@ import (
 	insightshttp "github.com/sl-bus/backend/internal/insights/http"
 	opshttp "github.com/sl-bus/backend/internal/ops/http"
 	opsservice "github.com/sl-bus/backend/internal/ops/service"
+	"github.com/sl-bus/backend/internal/platform/adminapi"
 	"github.com/sl-bus/backend/internal/platform/auth"
 	"github.com/sl-bus/backend/internal/platform/db"
 	"github.com/sl-bus/backend/internal/platform/httpx"
+	"github.com/sl-bus/backend/internal/platform/ratelimit"
+	"github.com/sl-bus/backend/internal/platform/sms"
 	"github.com/sl-bus/backend/internal/platform/wsgw"
 )
 
@@ -76,6 +79,8 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(httpx.RequestID)
+	// Off unless CORS_ALLOWED_ORIGINS is set (comma-separated; "*" for local dev).
+	r.Use(httpx.CORS(httpx.ParseOrigins(os.Getenv("CORS_ALLOWED_ORIGINS"))))
 	r.Use(middleware.Logger)
 
 	health := func(w http.ResponseWriter, req *http.Request) {
@@ -93,22 +98,29 @@ func main() {
 	// Repos are constructed against the shared pool; cross-context/RLS
 	// call sites (ops registration, WithTenantContext) bind fresh
 	// instances to a specific pgx.Tx instead, per platform/db/txscope.go.
+	// Redis backs live seat updates, and also the MFA pre-auth tokens and
+	// auth rate limits, so they hold across API instances and restarts.
+	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
+	redisClient := redis.NewClient(&redis.Options{
+		Addr: redisAddr,
+	})
+	defer func() { _ = redisClient.Close() }()
+
 	jwtIssuer := auth.NewJWTIssuer(requireSecret("JWT_SIGNING_KEY", "dev-only-insecure-signing-key-change-me"))
 	breachChecker := auth.NoopBreachChecker{}
 
 	userRepo := identityrepo.NewUserRepository(pool)
-	otpRepo := identityrepo.NewOTPRepository(pool)
 	refreshRepo := identityrepo.NewRefreshTokenRepository(pool)
 	trustedDeviceRepo := identityrepo.NewTrustedDeviceRepository(pool)
 
 	tokenIssuer := identityservice.NewTokenIssuer(jwtIssuer, refreshRepo)
-	preAuthStore := identityservice.NewPreAuthTokenStore()
+	preAuthStore := identityservice.NewRedisPreAuthStore(redisClient)
+	authCounter := ratelimit.NewRedisCounter(redisClient)
 	approvalSvc := opsservice.NewApprovalService(pool)
 
-	otpSvc := identityservice.NewOTPService(otpRepo, userRepo, identityservice.ConsoleNotifier{}, tokenIssuer)
 	passengerRegistrationSvc := identityservice.NewPassengerRegistrationService(userRepo, breachChecker)
-	loginSvc := identityservice.NewLoginService(userRepo, trustedDeviceRepo, breachChecker, approvalSvc, preAuthStore, tokenIssuer)
-	mfaSvc := identityservice.NewMFAService(userRepo, trustedDeviceRepo, preAuthStore, tokenIssuer)
+	loginSvc := identityservice.NewLoginService(userRepo, trustedDeviceRepo, breachChecker, approvalSvc, preAuthStore, authCounter, tokenIssuer)
+	mfaSvc := identityservice.NewMFAService(userRepo, trustedDeviceRepo, preAuthStore, authCounter, tokenIssuer)
 	tokenSvc := identityservice.NewTokenService(refreshRepo, userRepo, jwtIssuer, tokenIssuer)
 
 	registrationSvc := opsservice.NewRegistrationService(pool, breachChecker)
@@ -127,13 +139,6 @@ func main() {
 
 	// Phase 3 — Booking Core (IMPLEMENTATION_ROADMAP.md).
 	// Constructs the seat-hold repository, checkout service, and booking HTTP handlers.
-	// Also wires the Redis client for live seat-update pub/sub and WebSocket gateway.
-	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: redisAddr,
-	})
-	defer func() { _ = redisClient.Close() }()
-
 	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool, redisClient)
 	bookingRepo := bookingrepo.NewBookingRepository(pool)
 	bookingSeatRepo := bookingrepo.NewBookingSeatRepository(pool)
@@ -153,6 +158,14 @@ func main() {
 		qrTokenSecret,
 	)
 
+	// SMS provider balance for the admin dashboard. Without SMSlenz
+	// credentials the endpoint serves the worker's last cached figure, or 503.
+	_, smsClient, smsErr := sms.FromEnv()
+	if smsErr != nil {
+		logger.Warn("sms provider not configured; admin balance will be unavailable", "error", smsErr)
+	}
+	smsBalanceSvc := sms.NewBalanceService(smsClient, redisClient)
+
 	// WebSocket gateway for live seat updates
 	wsGateway := wsgw.NewGateway(redisClient, jwtIssuer, logger)
 
@@ -160,7 +173,6 @@ func main() {
 		Health:           health,
 		RegisterOperator: opshttp.NewRegisterHandler(registrationSvc),
 		Identity: identityhttp.Deps{
-			OTP:                   otpSvc,
 			PassengerRegistration: passengerRegistrationSvc,
 			Login:                 loginSvc,
 			MFA:                   mfaSvc,
@@ -190,6 +202,12 @@ func main() {
 			Verifier:        jwtIssuer,
 		},
 		SeatUpdatesWS: wsGateway.HandleSeatsSubscription,
+		Admin: adminapi.Deps{
+			Verifier:   jwtIssuer,
+			SMSBalance: smsBalanceSvc,
+			Policy:     sms.BalancePolicyFromEnv(),
+			Limiter:    authCounter,
+		},
 	})
 
 	addr := getenv("HTTP_ADDR", ":8080")

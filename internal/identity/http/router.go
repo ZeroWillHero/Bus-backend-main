@@ -13,7 +13,6 @@ import (
 )
 
 type Deps struct {
-	OTP                   *service.OTPService
 	PassengerRegistration *service.PassengerRegistrationService
 	Login                 *service.LoginService
 	MFA                   *service.MFAService
@@ -27,8 +26,6 @@ func NewRouter(deps Deps) chi.Router {
 	h := &handlers{deps: deps}
 	r := chi.NewRouter()
 
-	r.Post("/otp/request", h.requestOTP)
-	r.Post("/otp/verify", h.verifyOTP)
 	r.Post("/passenger/register", h.registerPassenger)
 	r.Post("/login", h.login)
 	r.Post("/mfa/enroll", h.enrollMFA)

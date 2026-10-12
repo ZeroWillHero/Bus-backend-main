@@ -10,6 +10,7 @@ import (
 	identityhttp "github.com/sl-bus/backend/internal/identity/http"
 	insightshttp "github.com/sl-bus/backend/internal/insights/http"
 	opshttp "github.com/sl-bus/backend/internal/ops/http"
+	"github.com/sl-bus/backend/internal/platform/adminapi"
 	"github.com/sl-bus/backend/internal/platform/apidocs"
 )
 
@@ -27,6 +28,7 @@ type routeDeps struct {
 	TripSeats        http.HandlerFunc
 	Booking          bookinghttp.Deps
 	SeatUpdatesWS    http.HandlerFunc
+	Admin            adminapi.Deps
 }
 
 func mountRoutes(r chi.Router, d routeDeps) {
@@ -43,6 +45,7 @@ func mountRoutes(r chi.Router, d routeDeps) {
 	d.Ops.MountOperatorScoped = func(r chi.Router) { insightshttp.Mount(r, d.Insights) }
 	r.Mount("/v1/operators", opshttp.NewRouter(d.Ops))
 	r.Mount("/v1/fleet", fleethttp.NewRouter(d.Fleet))
+	r.Mount("/v1/admin", adminapi.NewRouter(d.Admin))
 	r.Get("/v1/trips/search", d.Search)
 	r.Get("/v1/trips/{tripID}/seats", d.TripSeats)
 	r.Mount("/v1", bookinghttp.NewRouter(d.Booking))

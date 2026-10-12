@@ -6,15 +6,17 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sl-bus/backend/internal/platform/db"
+
 	"github.com/sl-bus/backend/internal/booking/domain"
 )
 
 type BookingSeatRepository struct {
-	pool *pgxpool.Pool
+	pool db.Querier
 }
 
 func NewBookingSeatRepository(pool *pgxpool.Pool) *BookingSeatRepository {
-	return &BookingSeatRepository{pool: pool}
+	return &BookingSeatRepository{pool: db.NewScoped(pool, db.ScopeCaller)}
 }
 
 func (r *BookingSeatRepository) CreateBulk(ctx context.Context, seats []*domain.BookingSeat) error {

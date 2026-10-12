@@ -1,3 +1,9 @@
+//go:build legacy_otp
+
+// Legacy phone-only OTP sign-in, excluded from the build: it issued full
+// tokens with no password or second factor. Superseded by SMS as a second
+// factor (docs/SMS_VERIFICATION_DESIGN.md). Safe to delete.
+
 package http
 
 import (
@@ -45,8 +51,4 @@ func clientIP(r *http.Request) string {
 		return fwd
 	}
 	return r.RemoteAddr
-}
-
-func deviceInfo(r *http.Request) string {
-	return r.Header.Get("User-Agent")
 }

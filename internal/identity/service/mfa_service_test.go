@@ -9,6 +9,7 @@ import (
 
 	"github.com/sl-bus/backend/internal/identity/domain"
 	"github.com/sl-bus/backend/internal/platform/auth"
+	"github.com/sl-bus/backend/internal/platform/ratelimit"
 )
 
 // fakeUserRepo keeps users in memory. Embedding the interface leaves the
@@ -76,7 +77,7 @@ func (fakeRefreshTokens) Create(_ context.Context, userID, tokenHash, deviceInfo
 type mfaFixture struct {
 	users   *fakeUserRepo
 	devices *fakeTrustedDevices
-	preAuth *PreAuthTokenStore
+	preAuth *MemoryPreAuthStore
 	svc     *MFAService
 }
 
@@ -84,10 +85,10 @@ func newMFAFixture(user *domain.User) *mfaFixture {
 	f := &mfaFixture{
 		users:   newFakeUserRepo(user),
 		devices: &fakeTrustedDevices{},
-		preAuth: NewPreAuthTokenStore(),
+		preAuth: NewMemoryPreAuthStore(),
 	}
 	tokens := NewTokenIssuer(auth.NewJWTIssuer("test-signing-key"), fakeRefreshTokens{})
-	f.svc = NewMFAService(f.users, f.devices, f.preAuth, tokens)
+	f.svc = NewMFAService(f.users, f.devices, f.preAuth, ratelimit.NewMemoryCounter(), tokens)
 	return f
 }
 
@@ -111,7 +112,7 @@ func wrongCode(t *testing.T, secret string) string {
 func TestEnrollMFAOnlySavesTheSecretOnceACodeVerifies(t *testing.T) {
 	ctx := context.Background()
 	f := newMFAFixture(&domain.User{ID: "u1", Email: "ann@example.com", Role: domain.RolePassenger})
-	token := f.preAuth.Issue("u1", "device-1", "test")
+	token := issue(t, f.preAuth, "u1", "device-1", "test")
 
 	secret, uri, err := f.svc.EnrollMFA(ctx, token)
 	if err != nil {
@@ -137,7 +138,7 @@ func TestEnrollMFAOnlySavesTheSecretOnceACodeVerifies(t *testing.T) {
 
 func TestEnrollMFARejectsAnAlreadyEnrolledAccount(t *testing.T) {
 	f := newMFAFixture(&domain.User{ID: "u1", Email: "ann@example.com", Role: domain.RolePassenger, MFATOTPSecret: "EXISTINGSECRET"})
-	token := f.preAuth.Issue("u1", "", "test")
+	token := issue(t, f.preAuth, "u1", "", "test")
 
 	if _, _, err := f.svc.EnrollMFA(context.Background(), token); err != domain.ErrMFAAlreadyEnrolled {
 		t.Fatalf("EnrollMFA error = %v, want ErrMFAAlreadyEnrolled", err)
@@ -151,7 +152,7 @@ func TestVerifyMFAAllowsRetryingAWrongCode(t *testing.T) {
 	ctx := context.Background()
 	secret, _, _ := auth.GenerateTOTPSecret("ann@example.com")
 	f := newMFAFixture(&domain.User{ID: "u1", Email: "ann@example.com", Role: domain.RolePassenger, MFATOTPSecret: secret})
-	token := f.preAuth.Issue("u1", "", "test")
+	token := issue(t, f.preAuth, "u1", "", "test")
 
 	if _, err := f.svc.VerifyMFA(ctx, token, wrongCode(t, secret)); err != domain.ErrInvalidMFACode {
 		t.Fatalf("wrong code error = %v, want ErrInvalidMFACode", err)
@@ -168,7 +169,7 @@ func TestVerifyMFACapsAttemptsPerToken(t *testing.T) {
 	ctx := context.Background()
 	secret, _, _ := auth.GenerateTOTPSecret("ann@example.com")
 	f := newMFAFixture(&domain.User{ID: "u1", Email: "ann@example.com", Role: domain.RolePassenger, MFATOTPSecret: secret})
-	token := f.preAuth.Issue("u1", "", "test")
+	token := issue(t, f.preAuth, "u1", "", "test")
 
 	for i := 0; i < maxPreAuthAttempts; i++ {
 		if _, err := f.svc.VerifyMFA(ctx, token, wrongCode(t, secret)); err != domain.ErrInvalidMFACode {
@@ -209,4 +210,13 @@ func TestRegisterPassenger(t *testing.T) {
 	if _, err := svc.RegisterPassenger(ctx, "ann@example.com", "another-long-password"); err != domain.ErrEmailTaken {
 		t.Fatalf("duplicate email error = %v, want ErrEmailTaken", err)
 	}
+}
+
+func issue(t *testing.T, s PreAuthStore, userID, fingerprint, info string) string {
+	t.Helper()
+	token, err := s.Issue(context.Background(), userID, fingerprint, info)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	return token
 }

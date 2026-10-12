@@ -10,6 +10,7 @@ var (
 	ErrOperatorNotApproved         = errors.New("fleet: operator is not approved")
 	ErrOperatorMismatch            = errors.New("fleet: bus and route must belong to the same operator")
 	ErrInvalidTripStatusTransition = errors.New("fleet: invalid trip status transition")
+	ErrBusHasNoSeatMap             = errors.New("fleet: bus has no seat map")
 
 	// ErrNotFound is the generic "no row" signal repositories return;
 	// callers translate it into a context-specific error, same pattern as

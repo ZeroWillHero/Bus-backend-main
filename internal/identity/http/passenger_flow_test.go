@@ -14,6 +14,7 @@ import (
 	"github.com/sl-bus/backend/internal/identity/domain"
 	"github.com/sl-bus/backend/internal/identity/service"
 	"github.com/sl-bus/backend/internal/platform/auth"
+	"github.com/sl-bus/backend/internal/platform/ratelimit"
 )
 
 // memUsers is an in-memory domain.UserRepository covering what the
@@ -83,12 +84,13 @@ func (memRefreshTokens) Create(_ context.Context, userID, tokenHash, deviceInfo 
 func newPassengerTestRouter() http.Handler {
 	users := &memUsers{byID: map[string]*domain.User{}}
 	devices := &memTrustedDevices{until: map[string]time.Time{}}
-	preAuth := service.NewPreAuthTokenStore()
+	preAuth := service.NewMemoryPreAuthStore()
+	failures := ratelimit.NewMemoryCounter()
 	tokens := service.NewTokenIssuer(auth.NewJWTIssuer("test-signing-key"), memRefreshTokens{})
 	return NewRouter(Deps{
 		PassengerRegistration: service.NewPassengerRegistrationService(users, auth.NoopBreachChecker{}),
-		Login:                 service.NewLoginService(users, devices, auth.NoopBreachChecker{}, nil, preAuth, tokens),
-		MFA:                   service.NewMFAService(users, devices, preAuth, tokens),
+		Login:                 service.NewLoginService(users, devices, auth.NoopBreachChecker{}, nil, preAuth, failures, tokens),
+		MFA:                   service.NewMFAService(users, devices, preAuth, failures, tokens),
 	})
 }
 

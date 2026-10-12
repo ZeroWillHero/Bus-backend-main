@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/redis/go-redis/v9"
+	"github.com/sl-bus/backend/internal/platform/db"
 
 	bookingdomain "github.com/sl-bus/backend/internal/booking/domain"
 )
@@ -17,12 +19,12 @@ import (
 // The actual invariant preventing overselling is the DB's UNIQUE(trip_id, seat_number)
 // + optimistic-concurrency version check (DATABASE_DESIGN.md §3).
 type SeatInventoryRepository struct {
-	pool  *pgxpool.Pool
+	pool  db.Querier
 	redis *redis.Client
 }
 
 func NewSeatInventoryRepository(pool *pgxpool.Pool, redis *redis.Client) *SeatInventoryRepository {
-	return &SeatInventoryRepository{pool: pool, redis: redis}
+	return &SeatInventoryRepository{pool: db.NewScoped(pool, db.ScopeSystem), redis: redis}
 }
 
 // HoldSeats attempts to hold the requested seat numbers for a booking.

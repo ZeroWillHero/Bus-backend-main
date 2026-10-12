@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -75,6 +76,9 @@ func (s *TripService) CreateTrips(ctx context.Context, claims *auth.Claims, in C
 			return domain.ErrOperatorMismatch
 		}
 		seatMap, err := seatMapRepo.FindByBusID(ctx, in.BusID)
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.ErrBusHasNoSeatMap
+		}
 		if err != nil {
 			return err
 		}

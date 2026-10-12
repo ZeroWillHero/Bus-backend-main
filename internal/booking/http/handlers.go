@@ -2,14 +2,18 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sl-bus/backend/internal/booking/domain"
 	"github.com/sl-bus/backend/internal/booking/service"
 	"github.com/sl-bus/backend/internal/platform/auth"
+	"github.com/sl-bus/backend/internal/platform/httpx"
 )
 
 // CreateBookingRequest holds the seat selection for a new booking
@@ -26,9 +30,23 @@ type CreateBookingRequest struct {
 type BookingResponse struct {
 	ID            string  `json:"id"`
 	TripID        string  `json:"tripId"`
+	PassengerID   string  `json:"passengerId"`
 	Status        string  `json:"status"`
 	TotalAmount   float64 `json:"totalAmount"`
+	Currency      string  `json:"currency"`
 	HoldExpiresAt *string `json:"holdExpiresAt,omitempty"`
+	CreatedAt     string  `json:"createdAt"`
+	UpdatedAt     string  `json:"updatedAt"`
+	ConfirmedAt   *string `json:"confirmedAt,omitempty"`
+	CancelledAt   *string `json:"cancelledAt,omitempty"`
+}
+
+type TicketResponse struct {
+	ID        string `json:"id"`
+	BookingID string `json:"bookingId"`
+	QRToken   string `json:"qrToken"`
+	IssuedAt  string `json:"issuedAt"`
+	CheckedIn bool   `json:"checkedIn"`
 }
 
 // actorID returns the authenticated user's id (JWT subject). It is empty/false
@@ -41,11 +59,23 @@ func actorID(r *http.Request) (string, bool) {
 	return claims.Subject, true
 }
 
+func writeErr(w http.ResponseWriter, status int, code, message string) {
+	httpx.WriteError(w, status, httpx.APIError{Code: code, Message: message}, nil)
+}
+
+func unauthorized(w http.ResponseWriter) {
+	writeErr(w, http.StatusUnauthorized, "AUTH_TOKEN_INVALID", "Please sign in again.")
+}
+
+func badRequest(w http.ResponseWriter) {
+	writeErr(w, http.StatusBadRequest, "VALIDATION_FAILED", "Request body is not valid JSON.")
+}
+
 func NewCreateBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateBookingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+			badRequest(w)
 			return
 		}
 
@@ -63,53 +93,98 @@ func NewCreateBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 		// Identity comes from the verified JWT, never from the request body.
 		passengerID, ok := actorID(r)
 		if !ok {
-			http.Error(w, `{"code":"AUTH_UNAUTHORIZED"}`, http.StatusUnauthorized)
+			unauthorized(w)
 			return
 		}
 
-		input := service.CreateHoldInput{
+		booking, err := svc.CreateHold(r.Context(), service.CreateHoldInput{
 			TripID:      req.TripID,
 			Seats:       seats,
 			PassengerID: passengerID,
-		}
-
-		booking, err := svc.CreateHold(r.Context(), input)
+		})
 		if err != nil {
 			slog.Error("create_hold failed", "error", err)
-			switch err {
-			case domain.ErrSeatUnavailable:
-				http.Error(w, `{"code":"BOOKING_SEAT_UNAVAILABLE","message":"Seat unavailable"}`, http.StatusConflict)
-			case domain.ErrUnknownSeat, domain.ErrDuplicateSeat, domain.ErrNoSeatsSelected:
-				http.Error(w, `{"code":"VALIDATION_FAILED","message":"Invalid seat selection"}`, http.StatusUnprocessableEntity)
+			switch {
+			case errors.Is(err, domain.ErrSeatUnavailable):
+				writeErr(w, http.StatusConflict, "BOOKING_SEAT_UNAVAILABLE", "One or more of those seats were just taken.")
+			case errors.Is(err, domain.ErrUnknownSeat), errors.Is(err, domain.ErrDuplicateSeat), errors.Is(err, domain.ErrNoSeatsSelected):
+				writeErr(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Invalid seat selection.")
 			default:
-				http.Error(w, `{"code":"INTERNAL_ERROR","message":"Failed to create booking"}`, http.StatusInternalServerError)
+				writeErr(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create booking.")
 			}
 			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(bookingToResponse(booking))
+		httpx.WriteSuccess(w, http.StatusCreated, bookingToResponse(booking), nil)
 	}
 }
 
 func NewGetBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		bookingID := chi.URLParam(r, "id")
-
 		actor, ok := actorID(r)
 		if !ok {
-			http.Error(w, `{"code":"AUTH_UNAUTHORIZED"}`, http.StatusUnauthorized)
+			unauthorized(w)
 			return
 		}
-		booking, err := svc.GetBooking(r.Context(), actor, bookingID)
+		booking, err := svc.GetBooking(r.Context(), actor, chi.URLParam(r, "id"))
 		if err != nil {
-			http.Error(w, `{"code":"BOOKING_NOT_FOUND"}`, http.StatusNotFound)
+			writeErr(w, http.StatusNotFound, "BOOKING_NOT_FOUND", "Booking not found.")
 			return
 		}
+		httpx.WriteSuccess(w, http.StatusOK, bookingToResponse(booking), nil)
+	}
+}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(bookingToResponse(booking))
+// NewListBookingsHandler lists the signed-in passenger's own bookings.
+func NewListBookingsHandler(svc *service.CheckoutService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, ok := actorID(r)
+		if !ok {
+			unauthorized(w)
+			return
+		}
+		limit := 20
+		if v := r.URL.Query().Get("limit"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 100 {
+				writeErr(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "limit must be between 1 and 100.")
+				return
+			}
+			limit = n
+		}
+		bookings, next, err := svc.ListBookings(r.Context(), actor, r.URL.Query().Get("cursor"), limit)
+		if err != nil {
+			slog.Error("list_bookings failed", "error", err)
+			writeErr(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to load bookings.")
+			return
+		}
+		out := make([]BookingResponse, len(bookings))
+		for i, b := range bookings {
+			out[i] = bookingToResponse(b)
+		}
+		hasMore := next != ""
+		httpx.WriteSuccess(w, http.StatusOK, out, &httpx.Meta{NextCursor: next, HasMore: &hasMore})
+	}
+}
+
+// NewGetTicketHandler returns the passenger's own ticket, including the QR
+// token they show at boarding.
+func NewGetTicketHandler(svc *service.CheckoutService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, ok := actorID(r)
+		if !ok {
+			unauthorized(w)
+			return
+		}
+		ticket, err := svc.GetTicket(r.Context(), actor, chi.URLParam(r, "id"))
+		if err != nil {
+			code := "TICKET_NOT_FOUND"
+			if errors.Is(err, domain.ErrBookingNotFound) {
+				code = "BOOKING_NOT_FOUND"
+			}
+			writeErr(w, http.StatusNotFound, code, "Ticket not found.")
+			return
+		}
+		httpx.WriteSuccess(w, http.StatusOK, ticketToResponse(ticket), nil)
 	}
 }
 
@@ -119,98 +194,125 @@ type ConfirmBookingRequest struct {
 
 func NewConfirmBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		bookingID := chi.URLParam(r, "id")
-
 		var req ConfirmBookingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+			badRequest(w)
 			return
 		}
-
 		actor, ok := actorID(r)
 		if !ok {
-			http.Error(w, `{"code":"AUTH_UNAUTHORIZED"}`, http.StatusUnauthorized)
+			unauthorized(w)
 			return
 		}
-		booking, err := svc.ConfirmBooking(r.Context(), actor, bookingID, req.PaymentRef)
+		booking, err := svc.ConfirmBooking(r.Context(), actor, chi.URLParam(r, "id"), req.PaymentRef)
 		if err != nil {
 			slog.Error("confirm_booking failed", "error", err)
-			switch err {
-			case domain.ErrHoldExpired:
-				http.Error(w, `{"code":"BOOKING_HOLD_EXPIRED","message":"Hold has expired"}`, http.StatusGone)
-			case domain.ErrBookingNotFound:
-				http.Error(w, `{"code":"BOOKING_NOT_FOUND"}`, http.StatusNotFound)
+			switch {
+			case errors.Is(err, domain.ErrHoldExpired):
+				writeErr(w, http.StatusGone, "BOOKING_HOLD_EXPIRED", "Your seat hold has expired.")
+			case errors.Is(err, domain.ErrBookingNotFound):
+				writeErr(w, http.StatusNotFound, "BOOKING_NOT_FOUND", "Booking not found.")
+			case errors.Is(err, domain.ErrInvalidStatusTransition):
+				writeErr(w, http.StatusConflict, "BOOKING_INVALID_STATE", "This booking can no longer be paid.")
+			case errors.Is(err, domain.ErrPaymentDeclined):
+				writeErr(w, http.StatusPaymentRequired, "PAYMENT_DECLINED", "Payment failed.")
 			default:
-				http.Error(w, `{"code":"PAYMENT_DECLINED","message":"Payment failed"}`, http.StatusPaymentRequired)
+				writeErr(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to confirm booking.")
 			}
 			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(bookingToResponse(booking))
+		httpx.WriteSuccess(w, http.StatusOK, bookingToResponse(booking), nil)
 	}
 }
 
 func NewCancelBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		bookingID := chi.URLParam(r, "id")
-
 		actor, ok := actorID(r)
 		if !ok {
-			http.Error(w, `{"code":"AUTH_UNAUTHORIZED"}`, http.StatusUnauthorized)
+			unauthorized(w)
 			return
 		}
-		booking, err := svc.CancelBooking(r.Context(), actor, bookingID)
+		booking, err := svc.CancelBooking(r.Context(), actor, chi.URLParam(r, "id"))
 		if err != nil {
 			slog.Error("cancel_booking failed", "error", err)
-			http.Error(w, `{"code":"BOOKING_NOT_FOUND"}`, http.StatusNotFound)
+			switch {
+			case errors.Is(err, domain.ErrBookingNotFound):
+				writeErr(w, http.StatusNotFound, "BOOKING_NOT_FOUND", "Booking not found.")
+			case errors.Is(err, domain.ErrInvalidStatusTransition):
+				writeErr(w, http.StatusConflict, "BOOKING_NOT_CANCELLABLE", "This booking can no longer be cancelled.")
+			default:
+				writeErr(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to cancel booking.")
+			}
 			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(bookingToResponse(booking))
+		httpx.WriteSuccess(w, http.StatusOK, bookingToResponse(booking), nil)
 	}
 }
 
 func NewCheckInHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		qrToken := chi.URLParam(r, "qrToken")
-
-		ticket, err := svc.CheckIn(r.Context(), qrToken)
+		claims, ok := auth.FromContext(r.Context())
+		if !ok {
+			unauthorized(w)
+			return
+		}
+		ticket, err := svc.CheckIn(r.Context(), claims.OperatorID, chi.URLParam(r, "qrToken"))
 		if err != nil {
 			slog.Error("check_in failed", "error", err)
-			switch err {
-			case domain.ErrInvalidQRToken:
-				http.Error(w, `{"code":"INVALID_QR_TOKEN"}`, http.StatusBadRequest)
-			case domain.ErrAlreadyCheckedIn:
-				http.Error(w, `{"code":"TICKET_ALREADY_CHECKED_IN"}`, http.StatusConflict)
+			switch {
+			case errors.Is(err, domain.ErrInvalidQRToken):
+				writeErr(w, http.StatusBadRequest, "INVALID_QR_TOKEN", "This QR code is not valid.")
+			case errors.Is(err, domain.ErrAlreadyCheckedIn):
+				writeErr(w, http.StatusConflict, "TICKET_ALREADY_CHECKED_IN", "This ticket was already used.")
+			case errors.Is(err, domain.ErrTicketNotFound):
+				writeErr(w, http.StatusNotFound, "TICKET_NOT_FOUND", "Ticket not found.")
 			default:
-				http.Error(w, `{"code":"TICKET_NOT_FOUND"}`, http.StatusNotFound)
+				writeErr(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to check in ticket.")
 			}
 			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		httpx.WriteSuccess(w, http.StatusOK, map[string]any{
 			"id":        ticket.ID,
 			"bookingId": ticket.BookingID,
 			"checkedIn": ticket.CheckedInAt != nil,
-		})
+		}, nil)
 	}
 }
 
-func bookingToResponse(b *domain.Booking) BookingResponse {
-	var holdExpiresAt *string
-	if b.HoldExpiresAt != nil {
-		s := b.HoldExpiresAt.Format("2006-01-02T15:04:05Z")
-		holdExpiresAt = &s
-	}
+// utc renders an instant as RFC 3339 in UTC. The "Z" suffix is a claim that the
+// instant is in UTC, and the server's local zone is not.
+func utc(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
+func utcPtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := utc(*t)
+	return &s
+}
+
+func bookingToResponse(b *domain.Booking) BookingResponse {
 	return BookingResponse{
 		ID:            b.ID,
 		TripID:        b.TripID,
+		PassengerID:   b.PassengerID,
 		Status:        string(b.Status),
 		TotalAmount:   b.TotalAmount,
-		HoldExpiresAt: holdExpiresAt,
+		Currency:      b.Currency,
+		HoldExpiresAt: utcPtr(b.HoldExpiresAt),
+		CreatedAt:     utc(b.CreatedAt),
+		UpdatedAt:     utc(b.UpdatedAt),
+		ConfirmedAt:   utcPtr(b.ConfirmedAt),
+		CancelledAt:   utcPtr(b.CancelledAt),
+	}
+}
+
+func ticketToResponse(t *domain.Ticket) TicketResponse {
+	return TicketResponse{
+		ID:        t.ID,
+		BookingID: t.BookingID,
+		QRToken:   t.QRToken,
+		IssuedAt:  utc(t.IssuedAt),
+		CheckedIn: t.CheckedInAt != nil,
 	}
 }

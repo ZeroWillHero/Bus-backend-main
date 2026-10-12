@@ -7,15 +7,17 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sl-bus/backend/internal/platform/db"
+
 	"github.com/sl-bus/backend/internal/booking/domain"
 )
 
 type TicketRepository struct {
-	pool *pgxpool.Pool
+	pool db.Querier
 }
 
 func NewTicketRepository(pool *pgxpool.Pool) *TicketRepository {
-	return &TicketRepository{pool: pool}
+	return &TicketRepository{pool: db.NewScoped(pool, db.ScopeCaller)}
 }
 
 func (r *TicketRepository) Create(ctx context.Context, t *domain.Ticket) (*domain.Ticket, error) {
