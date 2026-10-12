@@ -161,7 +161,7 @@ func (r *scopedRow) Scan(dest ...any) error {
 		}
 		return pgx.ErrNoRows
 	}
-	err := r.rows.Rows.Scan(dest...)
+	err := r.rows.Scan(dest...)
 	if cerr := r.rows.finish(); err == nil {
 		err = cerr
 	}
