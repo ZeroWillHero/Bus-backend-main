@@ -63,12 +63,13 @@ jobs:
           MIGRATE_DATABASE_URL: ${{ secrets.MIGRATE_DATABASE_URL }}
           JWT_SIGNING_KEY: ${{ secrets.JWT_SIGNING_KEY }}
           QR_TOKEN_SECRET: ${{ secrets.QR_TOKEN_SECRET }}
+          CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS || 'http://localhost:8081' }}
         with:
           host: ${{ secrets.SSH_HOST }}
           port: ${{ secrets.SSH_PORT || 22 }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,DATABASE_URL,MIGRATE_DATABASE_URL,JWT_SIGNING_KEY,QR_TOKEN_SECRET
+          envs: IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,DATABASE_URL,MIGRATE_DATABASE_URL,JWT_SIGNING_KEY,QR_TOKEN_SECRET,CORS_ALLOWED_ORIGINS
           script_stop: true
           script: |
             set -euo pipefail
@@ -84,6 +85,7 @@ jobs:
               echo "MIGRATE_DATABASE_URL=${MIGRATE_DATABASE_URL}"
               echo "JWT_SIGNING_KEY=${JWT_SIGNING_KEY}"
               echo "QR_TOKEN_SECRET=${QR_TOKEN_SECRET}"
+              echo "CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}"
               echo "DOMAIN=${DOMAIN}"
               echo "IMAGE=${IMAGE}"
             } > .env
