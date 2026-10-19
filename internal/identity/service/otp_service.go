@@ -8,7 +8,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -130,4 +132,9 @@ func (l *ipRateLimiter) Allow(ip string) bool {
 	}
 	l.requests[ip] = append(kept, time.Now())
 	return true
+}
+
+func hashOTP(code string) string {
+	sum := sha256.Sum256([]byte(code))
+	return hex.EncodeToString(sum[:])
 }
