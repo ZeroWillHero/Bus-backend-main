@@ -5,12 +5,20 @@
 --    session, and every policy's `current_setting(..)::uuid` then fails with
 --    `invalid input syntax for type uuid: ""`. Give the API role a valid
 --    default so a reverted setting is the zero uuid (matches no row), never ''.
+--    Hosted Postgres (e.g. Supabase) doesn't give the migration user superuser
+--    rights, so ALTER ROLE ... SET on a custom setting is refused there. That
+--    case is skipped with a notice: db.NewPool sets the same defaults on every
+--    new connection, which covers it without special privileges.
 DO $$
 BEGIN
     IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'slbus_app') THEN
-        ALTER ROLE slbus_app SET "app.current_operator_id" = '00000000-0000-0000-0000-000000000000';
-        ALTER ROLE slbus_app SET "app.current_user_id"     = '00000000-0000-0000-0000-000000000000';
-        ALTER ROLE slbus_app SET "app.current_role"        = '';
+        BEGIN
+            ALTER ROLE slbus_app SET "app.current_operator_id" = '00000000-0000-0000-0000-000000000000';
+            ALTER ROLE slbus_app SET "app.current_user_id"     = '00000000-0000-0000-0000-000000000000';
+            ALTER ROLE slbus_app SET "app.current_role"        = '';
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'skipping slbus_app role defaults (no privilege); the app pool sets them per connection';
+        END;
     END IF;
 END $$;
 

@@ -41,14 +41,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Copy compose, Caddyfile and migrations
+      - name: Copy compose, Caddyfile, Postgres init and migrations
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SSH_HOST }}
           port: ${{ secrets.SSH_PORT || 22 }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "deploy/docker-compose.prod.yml,deploy/Caddyfile,db/migrations"
+          source: "deploy/docker-compose.prod.yml,deploy/Caddyfile,deploy/postgres-init,db/migrations"
           target: /opt/sl-bus
           strip_components: 0
 
@@ -59,8 +59,8 @@ jobs:
           DOMAIN: ${{ secrets.DOMAIN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          MIGRATE_DATABASE_URL: ${{ secrets.MIGRATE_DATABASE_URL }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SLBUS_APP_PASSWORD: ${{ secrets.SLBUS_APP_PASSWORD }}
           JWT_SIGNING_KEY: ${{ secrets.JWT_SIGNING_KEY }}
           QR_TOKEN_SECRET: ${{ secrets.QR_TOKEN_SECRET }}
           CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS || 'http://localhost:8081' }}
@@ -69,20 +69,22 @@ jobs:
           port: ${{ secrets.SSH_PORT || 22 }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,DATABASE_URL,MIGRATE_DATABASE_URL,JWT_SIGNING_KEY,QR_TOKEN_SECRET,CORS_ALLOWED_ORIGINS
+          envs: IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,POSTGRES_PASSWORD,SLBUS_APP_PASSWORD,JWT_SIGNING_KEY,QR_TOKEN_SECRET,CORS_ALLOWED_ORIGINS
           script_stop: true
           script: |
             set -euo pipefail
             cd /opt/sl-bus
             mv -f deploy/docker-compose.prod.yml docker-compose.prod.yml
             mv -f deploy/Caddyfile Caddyfile
+            rm -rf postgres-init
+            mv deploy/postgres-init postgres-init
             rmdir deploy
 
             umask 077
             {
               echo "APP_ENV=production"
-              echo "DATABASE_URL=${DATABASE_URL}"
-              echo "MIGRATE_DATABASE_URL=${MIGRATE_DATABASE_URL}"
+              echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+              echo "SLBUS_APP_PASSWORD=${SLBUS_APP_PASSWORD}"
               echo "JWT_SIGNING_KEY=${JWT_SIGNING_KEY}"
               echo "QR_TOKEN_SECRET=${QR_TOKEN_SECRET}"
               echo "CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}"
