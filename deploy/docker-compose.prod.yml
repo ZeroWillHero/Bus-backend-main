@@ -1,14 +1,46 @@
 # Production stack. Lives in /opt/sl-bus on the server (copied by the deploy
 # workflow — the repo is never cloned there). Needs IMAGE and DOMAIN in the
 # shell env (deploy.yml sets them) plus a .env file with the app secrets.
+#
+# Postgres runs in this stack (no Supabase). POSTGRES_PASSWORD (superuser
+# `slbus`) and SLBUS_APP_PASSWORD (the API's non-superuser role) come from
+# .env; the connection URLs below are built from them, so keep both passwords
+# URL-safe (openssl rand -hex 24).
+x-db-urls:
+  superuser: &superuser-url postgres://slbus:${POSTGRES_PASSWORD}@postgres:5432/slbus?sslmode=disable
+  app: &app-url postgres://slbus_app:${SLBUS_APP_PASSWORD}@postgres:5432/slbus?sslmode=disable
+
 services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: slbus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: slbus
+      SLBUS_APP_PASSWORD: ${SLBUS_APP_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Runs only on first start (empty volume): creates slbus_app with the
+      # real password before migration 000005 would create it with a default.
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    # No published port: only the containers in this stack can reach it.
+    # Use `docker compose exec postgres psql -U slbus slbus` to get a shell.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slbus -d slbus"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   migrate:
     image: migrate/migrate:v4.18.1
-    # MIGRATE_DATABASE_URL is the superuser URL; the API uses slbus_app.
-    command: ["-path", "/migrations", "-database", "${MIGRATE_DATABASE_URL}", "up"]
+    # Runs as the superuser; the API uses slbus_app.
+    command: ["-path", "/migrations", "-database", *superuser-url, "up"]
     volumes:
       - ./db/migrations:/migrations:ro
-    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: "no"
 
   api:
@@ -18,6 +50,7 @@ services:
     environment:
       HTTP_ADDR: ":8080"
       REDIS_ADDR: "redis:6379"
+      DATABASE_URL: *app-url
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -35,6 +68,9 @@ services:
     image: ${IMAGE}
     command: ["worker"]
     env_file: .env
+    environment:
+      # The outbox relay needs a privileged connection (cmd/worker/main.go).
+      WORKER_DATABASE_URL: *superuser-url
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -68,6 +104,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  pg_data:
   redis_data:
   caddy_data:
   caddy_config:
