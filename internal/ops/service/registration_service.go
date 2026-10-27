@@ -5,6 +5,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"regexp"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -58,6 +60,9 @@ func NewRegistrationService(pool *pgxpool.Pool, breachChecker auth.PasswordBreac
 // context, and there is no pre-existing context here at all).
 func (s *RegistrationService) RegisterOperator(ctx context.Context, in RegisterOperatorInput) (*domain.Operator, *identitydomain.User, error) {
 	if err := validatePasswordLength(in.Password); err != nil {
+		return nil, nil, err
+	}
+	if err := ValidateRegistrationDocURL(in.RegistrationDocURL); err != nil {
 		return nil, nil, err
 	}
 	breached, err := s.breachChecker.IsBreached(ctx, in.Password)
@@ -121,6 +126,41 @@ var (
 func validatePasswordLength(password string) error {
 	if len(password) < MinPasswordLength {
 		return ErrPasswordTooShort
+	}
+	return nil
+}
+
+// MaxRegistrationDocURLLength caps registrationDocUrl. The operator app
+// inlines the document as a data:image/...;base64 URI, so this is sized for
+// a compressed photo (~700 KB of characters) and must stay below
+// httpx.DefaultMaxBodyBytes so the whole request still fits.
+const MaxRegistrationDocURLLength = 700 * 1024
+
+var (
+	ErrRegistrationDocTooLarge = fmt.Errorf("ops: registration document exceeds %d characters", MaxRegistrationDocURLLength)
+	ErrRegistrationDocInvalid  = fmt.Errorf("ops: registration document must be an https URL or a png/jpeg/webp base64 data URI")
+)
+
+// dataImageURI matches the inline form the operator app sends; the payload
+// must be plain base64 so nothing else can ride along.
+var dataImageURI = regexp.MustCompile(`^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$`)
+
+// ValidateRegistrationDocURL accepts an empty value (the field is optional),
+// an absolute https URL, or a data:image/(png|jpeg|webp);base64 URI, each at
+// most MaxRegistrationDocURLLength characters.
+func ValidateRegistrationDocURL(doc string) error {
+	if doc == "" {
+		return nil
+	}
+	if len(doc) > MaxRegistrationDocURLLength {
+		return ErrRegistrationDocTooLarge
+	}
+	if dataImageURI.MatchString(doc) {
+		return nil
+	}
+	u, err := url.Parse(doc)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return ErrRegistrationDocInvalid
 	}
 	return nil
 }

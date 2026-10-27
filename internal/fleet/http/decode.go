@@ -17,10 +17,7 @@ var validate = validator.New()
 // name (ENGINEERING_STANDARDS.md §3.2).
 func decodeAndValidate(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, httpx.APIError{
-			Code:    "VALIDATION_FAILED",
-			Message: "Request body is not valid JSON.",
-		}, nil)
+		httpx.WriteDecodeError(w, err)
 		return false
 	}
 	if err := validate.Struct(dst); err != nil {

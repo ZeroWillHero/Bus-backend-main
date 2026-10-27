@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"math"
 	"time"
 
 	"github.com/sl-bus/backend/internal/identity/domain"
@@ -14,6 +13,25 @@ import (
 // LockoutBaseDelay is the base of the exponential backoff applied after
 // MaxFailedLoginAttempts (AUTHENTICATION_DESIGN.md §6).
 const LockoutBaseDelay = 30 * time.Second
+
+// MaxLockoutDelay caps the exponential backoff so repeated failures can't
+// lock an account out indefinitely or overflow time.Duration.
+const MaxLockoutDelay = time.Hour
+
+// lockoutBackoff returns LockoutBaseDelay * 2^excess, capped at
+// MaxLockoutDelay. It doubles in integer steps and stops at the cap, so no
+// float or Duration overflow is possible for any attempt count.
+func lockoutBackoff(failedAttempts int) time.Duration {
+	excess := failedAttempts - domain.MaxFailedLoginAttempts
+	d := LockoutBaseDelay
+	for i := 0; i < excess && d < MaxLockoutDelay; i++ {
+		d *= 2
+	}
+	if d > MaxLockoutDelay {
+		d = MaxLockoutDelay
+	}
+	return d
+}
 
 // LoginResult is either a full TokenPair (MFA not required, or already
 // satisfied via a trusted device) or an MFA challenge the caller must
@@ -84,8 +102,7 @@ func (s *LoginService) Login(ctx context.Context, email, password, deviceFingerp
 			return nil, incErr
 		}
 		if updated.FailedLoginAttempts >= domain.MaxFailedLoginAttempts {
-			backoff := time.Duration(math.Pow(2, float64(updated.FailedLoginAttempts-domain.MaxFailedLoginAttempts))) * LockoutBaseDelay
-			if err := s.userRepo.SetLockedUntil(ctx, user.ID, now.Add(backoff)); err != nil {
+			if err := s.userRepo.SetLockedUntil(ctx, user.ID, now.Add(lockoutBackoff(updated.FailedLoginAttempts))); err != nil {
 				return nil, err
 			}
 		}

@@ -97,6 +97,18 @@ func (q *Queries) ListActiveRefreshTokensForUser(ctx context.Context, userID pgt
 	return items, nil
 }
 
+const revokeAllRefreshTokensForOperator = `-- name: RevokeAllRefreshTokensForOperator :exec
+UPDATE identity.refresh_tokens rt
+SET revoked_at = now()
+FROM identity.users u
+WHERE rt.user_id = u.id AND u.operator_id = $1 AND rt.revoked_at IS NULL
+`
+
+func (q *Queries) RevokeAllRefreshTokensForOperator(ctx context.Context, operatorID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, revokeAllRefreshTokensForOperator, operatorID)
+	return err
+}
+
 const revokeAllRefreshTokensForUser = `-- name: RevokeAllRefreshTokensForUser :exec
 UPDATE identity.refresh_tokens
 SET revoked_at = now()
@@ -108,13 +120,16 @@ func (q *Queries) RevokeAllRefreshTokensForUser(ctx context.Context, userID pgty
 	return err
 }
 
-const revokeRefreshToken = `-- name: RevokeRefreshToken :exec
+const revokeRefreshToken = `-- name: RevokeRefreshToken :execrows
 UPDATE identity.refresh_tokens
 SET revoked_at = now()
 WHERE id = $1 AND revoked_at IS NULL
 `
 
-func (q *Queries) RevokeRefreshToken(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, revokeRefreshToken, id)
-	return err
+func (q *Queries) RevokeRefreshToken(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeRefreshToken, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

@@ -62,8 +62,9 @@ type Querier interface {
 	ListTripsByOperator(ctx context.Context, arg ListTripsByOperatorParams) ([]FleetTrip, error)
 	RescheduleTrip(ctx context.Context, arg RescheduleTripParams) (FleetTrip, error)
 	ResetUserLockout(ctx context.Context, id pgtype.UUID) error
+	RevokeAllRefreshTokensForOperator(ctx context.Context, operatorID pgtype.UUID) error
 	RevokeAllRefreshTokensForUser(ctx context.Context, userID pgtype.UUID) error
-	RevokeRefreshToken(ctx context.Context, id pgtype.UUID) error
+	RevokeRefreshToken(ctx context.Context, id pgtype.UUID) (int64, error)
 	SearchTripsByDeparture(ctx context.Context, arg SearchTripsByDepartureParams) ([]SearchTripsByDepartureRow, error)
 	// Cross-operator search (FR-SRCH-1) — runs under a synthetic
 	// platform_admin tenant context (see fleet/service/search_service.go),

@@ -29,6 +29,8 @@ type routeDeps struct {
 	Booking          bookinghttp.Deps
 	SeatUpdatesWS    http.HandlerFunc
 	Admin            adminapi.Deps
+	// RegisterLimit optionally rate-limits POST /v1/auth/register (nil = none).
+	RegisterLimit func(http.Handler) http.Handler
 }
 
 func mountRoutes(r chi.Router, d routeDeps) {
@@ -39,7 +41,11 @@ func mountRoutes(r chi.Router, d routeDeps) {
 	r.Get("/openapi.yaml", apidocs.Spec)
 
 	r.Route("/v1/auth", func(r chi.Router) {
-		r.Post("/register", d.RegisterOperator)
+		register := http.Handler(d.RegisterOperator)
+		if d.RegisterLimit != nil {
+			register = d.RegisterLimit(register)
+		}
+		r.Method(http.MethodPost, "/register", register)
 		r.Mount("/", identityhttp.NewRouter(d.Identity))
 	})
 	d.Ops.MountOperatorScoped = func(r chi.Router) { insightshttp.Mount(r, d.Insights) }

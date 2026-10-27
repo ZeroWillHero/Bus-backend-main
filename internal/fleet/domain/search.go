@@ -15,6 +15,15 @@ const (
 	SortByDeparture SortBy = "departure"
 )
 
+// BookingCutoff is how close to departure a trip stops being bookable: search
+// hides it, the seat map reports it as not bookable, and holds are refused.
+// One value for all three so a passenger never sees a trip they can't hold.
+const BookingCutoff = 10 * time.Minute
+
+// TripFallbackDuration is how long after departure a trip is treated as
+// arrived when its route has no stop arrival offsets to derive it from.
+const TripFallbackDuration = 12 * time.Hour
+
 type SearchCriteria struct {
 	Origin      string
 	Destination string

@@ -104,8 +104,11 @@ type tripSeatResponse struct {
 }
 
 type tripSeatMapResponse struct {
-	TripID string             `json:"tripId"`
-	Seats  []tripSeatResponse `json:"seats"`
+	TripID string `json:"tripId"`
+	// Bookable is false once the trip has departed (or is within the booking
+	// cutoff): the map is still shown, but holds will be refused.
+	Bookable bool               `json:"bookable"`
+	Seats    []tripSeatResponse `json:"seats"`
 }
 
 // tripSeats handles GET /v1/trips/{tripID}/seats — public, no auth, so a
@@ -117,12 +120,12 @@ func (h *handlers) tripSeats(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, domain.ErrTripNotFound)
 		return
 	}
-	seats, err := h.deps.Search.TripSeats(r.Context(), tripID)
+	seats, bookable, err := h.deps.Search.TripSeats(r.Context(), tripID)
 	if err != nil {
 		writeDomainError(w, err)
 		return
 	}
-	out := tripSeatMapResponse{TripID: tripID, Seats: make([]tripSeatResponse, 0, len(seats))}
+	out := tripSeatMapResponse{TripID: tripID, Bookable: bookable, Seats: make([]tripSeatResponse, 0, len(seats))}
 	for _, s := range seats {
 		out.Seats = append(out.Seats, tripSeatResponse{
 			SeatNumber: s.SeatNumber,

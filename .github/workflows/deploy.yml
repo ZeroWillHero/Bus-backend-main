@@ -41,14 +41,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Copy compose, Caddyfile, Postgres init and migrations
+      - name: Copy compose, Caddyfile, Postgres init, backup scripts and migrations
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SSH_HOST }}
           port: ${{ secrets.SSH_PORT || 22 }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "deploy/docker-compose.prod.yml,deploy/Caddyfile,deploy/postgres-init,db/migrations"
+          source: "deploy/docker-compose.prod.yml,deploy/Caddyfile,deploy/postgres-init,deploy/backup,db/migrations"
           target: /opt/sl-bus
           strip_components: 0
 
@@ -68,12 +68,21 @@ jobs:
           # (cmd/server/bootstrap_admin.go). Leave the secrets unset to skip.
           BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
           BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+          # Optional off-site copy of the nightly DB backup (db-backup service,
+          # runbooks/database-backup-restore.md). Leave BACKUP_S3_BUCKET unset
+          # to keep backups on the server only.
+          BACKUP_S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+          BACKUP_S3_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+          BACKUP_S3_REGION: ${{ secrets.BACKUP_S3_REGION }}
+          BACKUP_S3_PREFIX: ${{ secrets.BACKUP_S3_PREFIX }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         with:
           host: ${{ secrets.SSH_HOST }}
           port: ${{ secrets.SSH_PORT || 22 }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,POSTGRES_PASSWORD,SLBUS_APP_PASSWORD,JWT_SIGNING_KEY,QR_TOKEN_SECRET,CORS_ALLOWED_ORIGINS,BOOTSTRAP_ADMIN_EMAIL,BOOTSTRAP_ADMIN_PASSWORD
+          envs: IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,POSTGRES_PASSWORD,SLBUS_APP_PASSWORD,JWT_SIGNING_KEY,QR_TOKEN_SECRET,CORS_ALLOWED_ORIGINS,BOOTSTRAP_ADMIN_EMAIL,BOOTSTRAP_ADMIN_PASSWORD,BACKUP_S3_BUCKET,BACKUP_S3_ENDPOINT,BACKUP_S3_REGION,BACKUP_S3_PREFIX,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY
           script_stop: true
           script: |
             set -euo pipefail
@@ -82,6 +91,8 @@ jobs:
             mv -f deploy/Caddyfile Caddyfile
             rm -rf postgres-init
             mv deploy/postgres-init postgres-init
+            rm -rf backup
+            mv deploy/backup backup
             rmdir deploy
 
             umask 077
@@ -97,6 +108,17 @@ jobs:
               echo "BOOTSTRAP_ADMIN_EMAIL=${BOOTSTRAP_ADMIN_EMAIL}"
               echo "BOOTSTRAP_ADMIN_PASSWORD=${BOOTSTRAP_ADMIN_PASSWORD}"
             } > .env
+
+            # Backup credentials go to their own file, loaded only by the
+            # db-backup service (api/worker load all of .env).
+            {
+              echo "BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET}"
+              echo "BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT}"
+              echo "BACKUP_S3_REGION=${BACKUP_S3_REGION}"
+              echo "BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX}"
+              echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+              echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            } > backup.env
 
             echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
             docker compose -f docker-compose.prod.yml pull

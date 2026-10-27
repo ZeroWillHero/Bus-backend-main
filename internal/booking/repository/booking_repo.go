@@ -92,22 +92,48 @@ func (r *BookingRepository) FindByPassenger(ctx context.Context, passengerID str
 	return bookings, "", rows.Err()
 }
 
-func (r *BookingRepository) UpdateStatus(ctx context.Context, id string, status domain.BookingStatus, confirmedAt, cancelledAt *time.Time) (*domain.Booking, error) {
+const bookingColumns = `id, trip_id, passenger_id, status, total_amount, currency, hold_expires_at,
+		          created_at, updated_at, confirmed_at, cancelled_at`
+
+// transitionSQL is a compare-and-set on status: it only changes a booking that
+// is still in the status the caller read, so two racing requests can never
+// both act on the same state.
+const transitionSQL = `UPDATE booking.bookings
+		 SET status = $3, updated_at = now(),
+		     confirmed_at = COALESCE($4, confirmed_at),
+		     cancelled_at = COALESCE($5, cancelled_at)
+		 WHERE id = $1 AND status = $2
+		 RETURNING ` + bookingColumns
+
+// TransitionStatus moves a booking from -> to only if it is still `from`.
+// Zero rows means another request changed it first: ErrConcurrentUpdate.
+func (r *BookingRepository) TransitionStatus(ctx context.Context, id string, from, to domain.BookingStatus, confirmedAt, cancelledAt *time.Time) (*domain.Booking, error) {
+	return scanTransition(r.pool.QueryRow(ctx, transitionSQL, id, from, to, confirmedAt, cancelledAt))
+}
+
+func scanTransition(row pgx.Row) (*domain.Booking, error) {
 	var b domain.Booking
-	now := time.Now()
-
-	err := r.pool.QueryRow(ctx,
-		`UPDATE booking.bookings
-		 SET status = $1, updated_at = $2, confirmed_at = $3, cancelled_at = $4
-		 WHERE id = $5
-		 RETURNING id, trip_id, passenger_id, status, total_amount, currency, hold_expires_at,
-		          created_at, updated_at, confirmed_at, cancelled_at`,
-		status, now, confirmedAt, cancelledAt, id,
-	).Scan(&b.ID, &b.TripID, &b.PassengerID, &b.Status, &b.TotalAmount, &b.Currency, &b.HoldExpiresAt,
+	err := row.Scan(&b.ID, &b.TripID, &b.PassengerID, &b.Status, &b.TotalAmount, &b.Currency, &b.HoldExpiresAt,
 		&b.CreatedAt, &b.UpdatedAt, &b.ConfirmedAt, &b.CancelledAt)
-	if err != nil {
-		return nil, fmt.Errorf("update_status: %w", err)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrConcurrentUpdate
 	}
-
+	if err != nil {
+		return nil, fmt.Errorf("transition_status: %w", err)
+	}
 	return &b, nil
+}
+
+// CountActiveHolds counts the passenger's unexpired held/payment_pending bookings.
+func (r *BookingRepository) CountActiveHolds(ctx context.Context, passengerID string) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx,
+		`SELECT count(*) FROM booking.bookings
+		 WHERE passenger_id = $1
+		   AND status IN ('held', 'payment_pending')
+		   AND hold_expires_at > now()`, passengerID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count_active_holds: %w", err)
+	}
+	return n, nil
 }

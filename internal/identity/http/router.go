@@ -6,6 +6,8 @@
 package http
 
 import (
+	"net/http"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sl-bus/backend/internal/identity/service"
@@ -18,6 +20,23 @@ type Deps struct {
 	MFA                   *service.MFAService
 	Tokens                *service.TokenService
 	Verifier              auth.Verifier
+	// RateLimits are optional per-endpoint middlewares (nil = unlimited).
+	RateLimits RateLimits
+}
+
+// RateLimits holds the per-IP limiters for the unauthenticated endpoints.
+type RateLimits struct {
+	Login             func(http.Handler) http.Handler
+	PassengerRegister func(http.Handler) http.Handler
+	MFAVerify         func(http.Handler) http.Handler
+	TokenRefresh      func(http.Handler) http.Handler
+}
+
+func orPassThrough(m func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	if m == nil {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return m
 }
 
 // NewRouter mounts every identity endpoint except /register (see package
@@ -26,11 +45,12 @@ func NewRouter(deps Deps) chi.Router {
 	h := &handlers{deps: deps}
 	r := chi.NewRouter()
 
-	r.Post("/passenger/register", h.registerPassenger)
-	r.Post("/login", h.login)
+	rl := deps.RateLimits
+	r.With(orPassThrough(rl.PassengerRegister)).Post("/passenger/register", h.registerPassenger)
+	r.With(orPassThrough(rl.Login)).Post("/login", h.login)
 	r.Post("/mfa/enroll", h.enrollMFA)
-	r.Post("/mfa/verify", h.verifyMFA)
-	r.Post("/token/refresh", h.refreshToken)
+	r.With(orPassThrough(rl.MFAVerify)).Post("/mfa/verify", h.verifyMFA)
+	r.With(orPassThrough(rl.TokenRefresh)).Post("/token/refresh", h.refreshToken)
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(deps.Verifier))

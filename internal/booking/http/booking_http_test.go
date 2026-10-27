@@ -48,7 +48,8 @@ func setupAs(t *testing.T, appRole bool) (http.Handler, *auth.JWTIssuer, string,
 	svc := service.NewCheckoutService(
 		bookingrepo.NewBookingRepository(app), bookingrepo.NewBookingSeatRepository(app),
 		bookingrepo.NewTicketRepository(app), seats, seats, approveAll{},
-		bookingrepo.NewOutboxRepository(app), []byte("qr"))
+		bookingrepo.NewOutboxRepository(app),
+		bookingrepo.NewConfirmationRepository(app, seats, bookingrepo.NewOutboxRepository(app)), []byte("qr"))
 	issuer := auth.NewJWTIssuer("http-test-secret")
 	router := bookinghttp.NewRouter(bookinghttp.Deps{CheckoutService: svc, Verifier: issuer})
 
@@ -240,6 +241,14 @@ func bookAndConfirm(t *testing.T, router http.Handler, issuer *auth.JWTIssuer, s
 	return resp.ID, passengerTok
 }
 
+// setTrip moves the trip into a given state after booking (bookings require a
+// future, scheduled trip; check-in requires departure within -2h..+6h).
+func setTrip(t *testing.T, scan func(string, interface{}, ...interface{}), trip, status, departIn string) {
+	t.Helper()
+	var id string
+	scan(`UPDATE fleet.trips SET status = $2, departure_at = now() + $3::interval WHERE id = $1 RETURNING id::text`, &id, trip, status, departIn)
+}
+
 func operatorTokenFor(t *testing.T, i *auth.JWTIssuer, userID, operatorID string, role auth.Role) string {
 	t.Helper()
 	tok, err := i.Issue(userID, role, operatorID, true)
@@ -253,6 +262,7 @@ func operatorTokenFor(t *testing.T, i *auth.JWTIssuer, userID, operatorID string
 func TestCheckInRoles(t *testing.T) {
 	router, issuer, trip, scan := setup(t)
 	bookingID, passengerTok := bookAndConfirm(t, router, issuer, scan, trip, "A1")
+	setTrip(t, scan, trip, "scheduled", "30 minutes")
 	var qr, op string
 	scan(`SELECT qr_token FROM booking.tickets WHERE booking_id = $1`, &qr, bookingID)
 	scan(`SELECT operator_id::text FROM fleet.trips WHERE id = $1`, &op, trip)
@@ -282,6 +292,7 @@ func TestCheckInIsScopedToTheTripsOperator(t *testing.T) {
 func checkInScopedToOperator(t *testing.T, appRole bool) {
 	router, issuer, trip, scan := setupAs(t, appRole)
 	bookingID, _ := bookAndConfirm(t, router, issuer, scan, trip, "A1")
+	setTrip(t, scan, trip, "scheduled", "30 minutes")
 	var qr, op, other string
 	scan(`SELECT qr_token FROM booking.tickets WHERE booking_id = $1`, &qr, bookingID)
 	scan(`SELECT operator_id::text FROM fleet.trips WHERE id = $1`, &op, trip)
@@ -369,5 +380,72 @@ func TestBookingLifecycleContract(t *testing.T) {
 
 	if rec := do(t, router, "POST", "/bookings/"+b.ID+"/cancel", tok, nil); rec.Code != http.StatusConflict || errorCode(t, rec) != "BOOKING_NOT_CANCELLABLE" {
 		t.Errorf("cancel confirmed: %d %s, want 409 BOOKING_NOT_CANCELLABLE", rec.Code, rec.Body.String())
+	}
+}
+
+// A hold on a trip that has departed (or is inside the booking cutoff) used
+// to succeed, since only status='scheduled' was checked. It must be a 409
+// BOOKING_TRIP_NOT_BOOKABLE, not a seat-validation error, and hold nothing.
+func TestHTTPHoldOnDepartedTripIsNotBookable(t *testing.T) {
+	router, issuer, trip, scan := setup(t)
+	var passengerID string
+	scan("INSERT INTO identity.users (phone, role) VALUES ('+94' || substr(replace(gen_random_uuid()::text,'-',''),1,12), 'passenger') RETURNING id::text", &passengerID)
+	passenger := tokenFor(t, issuer, passengerID, auth.RolePassenger)
+
+	for _, departAt := range []string{"-1 hour", "5 minutes"} {
+		var ignored string
+		scan(`UPDATE fleet.trips SET departure_at = now() + $2::interval WHERE id = $1 RETURNING id::text`, &ignored, trip, departAt)
+		rec := do(t, router, "POST", "/bookings/", passenger, map[string]interface{}{
+			"tripId": trip,
+			"seats":  []map[string]interface{}{{"seatNumber": "A1", "passengerName": "P"}},
+		})
+		if rec.Code != http.StatusConflict || errorCode(t, rec) != "BOOKING_TRIP_NOT_BOOKABLE" {
+			t.Errorf("departure %s: got %d %s, want 409 BOOKING_TRIP_NOT_BOOKABLE", departAt, rec.Code, rec.Body.String())
+		}
+	}
+	var status string
+	scan(`SELECT status FROM fleet.trip_seat_inventory WHERE trip_id = $1 AND seat_number = 'A1'`, &status, trip)
+	if status != "available" {
+		t.Errorf("seat status = %s, want available", status)
+	}
+}
+
+// Check-in is only valid for a boardable trip near departure; the reason is
+// only revealed to the trip's own operator.
+func TestCheckInWindowAndTripStatus(t *testing.T) {
+	cases := []struct {
+		status, departIn string
+		wantCode         int
+		wantErr          string
+	}{
+		{"scheduled", "1 day", http.StatusConflict, "TICKET_NOT_VALID_NOW"},
+		{"scheduled", "-7 hours", http.StatusConflict, "TICKET_NOT_VALID_NOW"},
+		{"cancelled", "30 minutes", http.StatusConflict, "TICKET_TRIP_CANCELLED"},
+		{"completed", "-1 hour", http.StatusOK, ""},
+		{"completed", "-7 hours", http.StatusConflict, "TICKET_NOT_VALID_NOW"},
+		{"scheduled", "90 minutes", http.StatusOK, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.status+"_"+tc.departIn, func(t *testing.T) {
+			router, issuer, trip, scan := setup(t)
+			bookingID, _ := bookAndConfirm(t, router, issuer, scan, trip, "A1")
+			setTrip(t, scan, trip, tc.status, tc.departIn)
+			var qr, op, other string
+			scan(`SELECT qr_token FROM booking.tickets WHERE booking_id = $1`, &qr, bookingID)
+			scan(`SELECT operator_id::text FROM fleet.trips WHERE id = $1`, &op, trip)
+			scan(`INSERT INTO ops.operators (name, business_reg_no, status) VALUES ('Other', 'REG-' || gen_random_uuid()::text, 'approved') RETURNING id::text`, &other)
+			path := "/tickets/" + qr + "/check-in"
+
+			foreign := operatorTokenFor(t, issuer, "66666666-6666-6666-6666-666666666666", other, auth.RoleOperatorStaff)
+			// Under RLS the ticket is invisible (400); either way no trip state leaks.
+			if rec := do(t, router, "POST", path, foreign, nil); rec.Code != http.StatusNotFound && rec.Code != http.StatusBadRequest {
+				t.Errorf("foreign operator: got %d (%s), want 404/400 before any trip state is revealed", rec.Code, rec.Body.String())
+			}
+			own := operatorTokenFor(t, issuer, "77777777-7777-7777-7777-777777777777", op, auth.RoleOperatorStaff)
+			rec := do(t, router, "POST", path, own, nil)
+			if rec.Code != tc.wantCode || (tc.wantErr != "" && errorCode(t, rec) != tc.wantErr) {
+				t.Errorf("got %d %s, want %d %s", rec.Code, rec.Body.String(), tc.wantCode, tc.wantErr)
+			}
+		})
 	}
 }

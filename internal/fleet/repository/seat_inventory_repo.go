@@ -3,9 +3,11 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/redis/go-redis/v9"
@@ -19,12 +21,13 @@ import (
 // The actual invariant preventing overselling is the DB's UNIQUE(trip_id, seat_number)
 // + optimistic-concurrency version check (DATABASE_DESIGN.md §3).
 type SeatInventoryRepository struct {
-	pool  db.Querier
-	redis *redis.Client
+	pool    db.Querier
+	rawPool *pgxpool.Pool
+	redis   *redis.Client
 }
 
 func NewSeatInventoryRepository(pool *pgxpool.Pool, redis *redis.Client) *SeatInventoryRepository {
-	return &SeatInventoryRepository{pool: db.NewScoped(pool, db.ScopeSystem), redis: redis}
+	return &SeatInventoryRepository{pool: db.NewScoped(pool, db.ScopeSystem), rawPool: pool, redis: redis}
 }
 
 // HoldSeats attempts to hold the requested seat numbers for a booking.
@@ -77,26 +80,72 @@ func (r *SeatInventoryRepository) HoldSeats(ctx context.Context, tripID string, 
 	return heldCount, nil
 }
 
-// ConfirmSeats transitions held seats to booked status, atomically
-// confirming the booking. Called after payment succeeds.
-func (r *SeatInventoryRepository) ConfirmSeats(ctx context.Context, tripID string, seatNumbers []string, bookingID string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE fleet.trip_seat_inventory
+// confirmSeatsSQL flips this booking's held seats to booked. Callers MUST
+// compare rows affected with len(seatNumbers): a seat whose hold expired and
+// was re-held by another booking simply doesn't match.
+const confirmSeatsSQL = `UPDATE fleet.trip_seat_inventory
 		 SET status = 'booked',
 		     version = version + 1
 		 WHERE trip_id = $1
 		   AND seat_number = ANY($2)
 		   AND status = 'held'
-		   AND booking_id = $3`,
-		tripID, seatNumbers, bookingID)
+		   AND booking_id = $3`
+
+// ConfirmSeats transitions held seats to booked status. Returns
+// ErrSeatUnavailable (and books nothing) unless every seat is still held for
+// this booking. ConfirmBooking uses ConfirmSeatsInTx instead.
+func (r *SeatInventoryRepository) ConfirmSeats(ctx context.Context, tripID string, seatNumbers []string, bookingID string) error {
+	err := db.InScopedTx(ctx, r.rawPool, db.ScopeSystem, func(tx pgx.Tx) error {
+		return r.ConfirmSeatsInTx(ctx, tx, tripID, seatNumbers, bookingID)
+	})
+	if err != nil {
+		return err
+	}
+	r.SeatsBooked(ctx, tripID, seatNumbers)
+	return nil
+}
+
+// ConfirmSeatsInTx is ConfirmSeats on the caller's transaction, so booking can
+// book the seats atomically with confirming the booking. The caller's tx must
+// carry an RLS identity allowed to update the inventory (system scope).
+// If not every seat matched it returns ErrSeatUnavailable; the caller must
+// roll back (rows already flipped in this tx are then undone).
+func (r *SeatInventoryRepository) ConfirmSeatsInTx(ctx context.Context, tx pgx.Tx, tripID string, seatNumbers []string, bookingID string) error {
+	tag, err := tx.Exec(ctx, confirmSeatsSQL, tripID, seatNumbers, bookingID)
 	if err != nil {
 		return fmt.Errorf("confirm_seats: %w", err)
 	}
-
-	// Publish seat update to Redis for live WS clients
-	_ = r.publishSeatUpdate(ctx, tripID, "booked", seatNumbers)
-
+	if n := int(tag.RowsAffected()); n != len(seatNumbers) {
+		return fmt.Errorf("confirm_seats: %d of %d seats still held for booking: %w",
+			n, len(seatNumbers), bookingdomain.ErrSeatUnavailable)
+	}
 	return nil
+}
+
+// SeatsBooked tells live seat-map clients the seats are booked. Call it only
+// after the transaction that booked them has committed.
+func (r *SeatInventoryRepository) SeatsBooked(ctx context.Context, tripID string, seatNumbers []string) {
+	_ = r.publishSeatUpdate(ctx, tripID, "booked", seatNumbers)
+}
+
+// ExtendHoldForBooking implements booking's SeatHoldPort: it counts this
+// booking's seats that are still held with an unexpired hold and pushes their
+// hold_expires_at to at least now()+d. Extending (rather than teaching the
+// fleet sweep about booking statuses) keeps ReleaseExpiredHolds free of any
+// cross-context join, and a hold can still never outlive a stuck charge by
+// more than d.
+func (r *SeatInventoryRepository) ExtendHoldForBooking(ctx context.Context, bookingID string, d time.Duration) (int, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE fleet.trip_seat_inventory
+		 SET hold_expires_at = GREATEST(hold_expires_at, now() + interval '1 second' * $2)
+		 WHERE booking_id = $1
+		   AND status = 'held'
+		   AND hold_expires_at > now()`,
+		bookingID, int64(d.Seconds()))
+	if err != nil {
+		return 0, fmt.Errorf("extend_hold_for_booking: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // ReleaseSeats transitions held/booked seats back to available,
@@ -138,7 +187,8 @@ func (r *SeatInventoryRepository) ReleaseSeats(ctx context.Context, tripID strin
 // ReleaseExpiredHolds is the idempotent mitigation for MITIGATION_PLAN.md §1.1:
 // a blanket sweep that flips all held rows with hold_expires_at < now() back to available.
 // Safe to call from multiple worker replicas simultaneously — it's a set-based WHERE,
-// not a queue pop.
+// not a queue pop. After the statement commits it publishes one 'available'
+// seat update per affected trip, so live seat maps see the seats free up.
 func (r *SeatInventoryRepository) ReleaseExpiredHolds(ctx context.Context) (releasedCount int, err error) {
 	// One statement, so the seat flip and the per-trip counter bump are atomic:
 	// a crash can't free seats without giving them back to trips.available_seats.
@@ -150,28 +200,38 @@ func (r *SeatInventoryRepository) ReleaseExpiredHolds(ctx context.Context) (rele
 			UPDATE fleet.trip_seat_inventory
 			SET status = 'available', booking_id = NULL, hold_expires_at = NULL, version = version + 1
 			WHERE status = 'held' AND hold_expires_at < now()
-			RETURNING trip_id
+			RETURNING trip_id, seat_number
 		), per_trip AS (
-			SELECT trip_id, count(*)::int AS n FROM released GROUP BY trip_id
+			SELECT trip_id, count(*)::int AS n, array_agg(seat_number ORDER BY seat_number) AS seats
+			FROM released GROUP BY trip_id
 		)
 		UPDATE fleet.trips t
 		SET available_seats = t.available_seats + p.n
 		FROM per_trip p
 		WHERE t.id = p.trip_id
-		RETURNING p.n`)
+		RETURNING p.trip_id, p.seats`)
 	if err != nil {
 		return 0, fmt.Errorf("release_expired_holds: %w", err)
 	}
-	defer rows.Close()
+	released := map[string][]string{}
 	for rows.Next() {
-		var n int
-		if err := rows.Scan(&n); err != nil {
-			return 0, fmt.Errorf("scan released count: %w", err)
+		var tripID string
+		var seats []string
+		if err := rows.Scan(&tripID, &seats); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan released seats: %w", err)
 		}
-		releasedCount += n
+		released[tripID] = seats
+		releasedCount += len(seats)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("release_expired_holds rows: %w", err)
+	}
+
+	// Rows are fully read, so the scoped statement has committed.
+	for tripID, seats := range released {
+		_ = r.publishSeatUpdate(ctx, tripID, "available", seats)
 	}
 	return releasedCount, nil
 }
@@ -201,8 +261,24 @@ func (r *SeatInventoryRepository) publishSeatUpdate(ctx context.Context, tripID,
 
 // SeatFares implements booking's TripPricingPort. The fare for a seat is the
 // trip's fare for that seat's class (fleet.trip_fares), falling back to the
-// trip's base fare. Only 'scheduled' trips are bookable.
+// trip's base fare. Only 'scheduled' trips departing more than
+// domain.BookingCutoff from now are bookable; any other existing trip returns
+// ErrTripNotBookable.
 func (r *SeatInventoryRepository) SeatFares(ctx context.Context, tripID string, seatNumbers []string) (map[string]float64, error) {
+	var bookable bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT status = 'scheduled' AND departure_at > now() + interval '1 second' * $2
+		FROM fleet.trips WHERE id = $1`, tripID, bookingCutoffSecs).Scan(&bookable)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, bookingdomain.ErrUnknownSeat
+	}
+	if err != nil {
+		return nil, fmt.Errorf("seat_fares trip: %w", err)
+	}
+	if !bookable {
+		return nil, bookingdomain.ErrTripNotBookable
+	}
+
 	rows, err := r.pool.Query(ctx, `
 		SELECT inv.seat_number, COALESCE(f.fare, t.base_fare)::float8
 		FROM fleet.trip_seat_inventory inv
@@ -241,6 +317,17 @@ func (r *SeatInventoryRepository) TripOperatorID(ctx context.Context, tripID str
 		return "", fmt.Errorf("trip_operator_id: %w", err)
 	}
 	return id, nil
+}
+
+// TripSchedule implements booking's TripPricingPort: operator, status, departure.
+func (r *SeatInventoryRepository) TripSchedule(ctx context.Context, tripID string) (*bookingdomain.TripSchedule, error) {
+	var t bookingdomain.TripSchedule
+	if err := r.pool.QueryRow(ctx,
+		`SELECT operator_id, status, departure_at FROM fleet.trips WHERE id = $1`, tripID,
+	).Scan(&t.OperatorID, &t.Status, &t.DepartureAt); err != nil {
+		return nil, fmt.Errorf("trip_schedule: %w", err)
+	}
+	return &t, nil
 }
 
 // ReleaseSeatsForBooking frees the seats held/booked for exactly this booking.

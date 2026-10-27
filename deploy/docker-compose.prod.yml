@@ -51,6 +51,9 @@ services:
       HTTP_ADDR: ":8080"
       REDIS_ADDR: "redis:6379"
       DATABASE_URL: *app-url
+      # Caddy is the one proxy in front of the API; per-IP rate limits read
+      # the X-Forwarded-For entry it appends.
+      TRUSTED_PROXY_HOPS: "1"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -74,6 +77,44 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Nightly pg_dump -Fc into the db_backups volume (deploy/backup/). Off-site
+  # upload is off unless BACKUP_S3_BUCKET is set in backup.env. Runbook:
+  # runbooks/database-backup-restore.md. Run one now:
+  #   docker compose -f docker-compose.prod.yml exec db-backup /backup/backup.sh
+  db-backup:
+    image: postgres:17   # same major as the server, so pg_dump matches
+    entrypoint: ["/bin/sh", "/backup/entrypoint.sh"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: slbus
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: slbus
+      TZ: ${BACKUP_TZ:-Asia/Colombo}
+      BACKUP_TIME: ${BACKUP_TIME:-02:30}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      BACKUP_DIR: /backups
+    # BACKUP_S3_* / AWS_* live in backup.env (written by deploy.yml), NOT in
+    # .env: api and worker load all of .env, and they must never see the
+    # off-site backup credentials. Optional: no file = local backups only.
+    env_file:
+      - path: backup.env
+        required: false
+    volumes:
+      - ./backup:/backup:ro
+      - db_backups:/backups
+    healthcheck:
+      # Unhealthy when the last scheduled backup failed.
+      test: ["CMD-SHELL", "grep -q '^ok' /backups/.last-status"]
+      interval: 5m
+      timeout: 5s
+      retries: 1
+      start_period: 1m
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   redis:
@@ -105,6 +146,7 @@ services:
 
 volumes:
   pg_data:
+  db_backups:
   redis_data:
   caddy_data:
   caddy_config:

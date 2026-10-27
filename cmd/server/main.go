@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -81,7 +82,9 @@ func main() {
 	r.Use(httpx.RequestID)
 	// Off unless CORS_ALLOWED_ORIGINS is set (comma-separated; "*" for local dev).
 	r.Use(httpx.CORS(httpx.ParseOrigins(os.Getenv("CORS_ALLOWED_ORIGINS"))))
-	r.Use(middleware.Logger)
+	// Logs path only (no query string): the WS endpoint carries ?token=JWT.
+	r.Use(httpx.RequestLogger(logger))
+	r.Use(httpx.MaxBodyBytes(httpx.DefaultMaxBodyBytes))
 
 	health := func(w http.ResponseWriter, req *http.Request) {
 		if err := pool.Ping(req.Context()); err != nil {
@@ -116,12 +119,20 @@ func main() {
 	tokenIssuer := identityservice.NewTokenIssuer(jwtIssuer, refreshRepo)
 	preAuthStore := identityservice.NewRedisPreAuthStore(redisClient)
 	authCounter := ratelimit.NewRedisCounter(redisClient)
+
+	// Per-IP limits key on httpx.ClientIP; TRUSTED_PROXY_HOPS=1 behind Caddy
+	// so X-Forwarded-For's right-most entry is used (0 = ignore the header).
+	trustedHops := trustedProxyHops(logger)
+	byIP := ratelimit.ByClientIP(trustedHops)
+	limitIP := func(rule ratelimit.Rule) func(http.Handler) http.Handler {
+		return ratelimit.Middleware(authCounter, rule, byIP)
+	}
 	approvalSvc := opsservice.NewApprovalService(pool)
 
 	passengerRegistrationSvc := identityservice.NewPassengerRegistrationService(userRepo, breachChecker)
 	loginSvc := identityservice.NewLoginService(userRepo, trustedDeviceRepo, breachChecker, approvalSvc, preAuthStore, authCounter, tokenIssuer)
 	mfaSvc := identityservice.NewMFAService(userRepo, trustedDeviceRepo, preAuthStore, authCounter, tokenIssuer)
-	tokenSvc := identityservice.NewTokenService(refreshRepo, userRepo, jwtIssuer, tokenIssuer)
+	tokenSvc := identityservice.NewTokenService(refreshRepo, userRepo, approvalSvc, jwtIssuer, tokenIssuer)
 
 	registrationSvc := opsservice.NewRegistrationService(pool, breachChecker)
 	listingSvc := opsservice.NewListingService(pool)
@@ -155,6 +166,8 @@ func main() {
 		seatInventoryRepo, // also the TripPricingPort: server-side fares
 		paymentGateway,
 		outboxRepo,
+		// Unit of work for the post-charge confirm: seats, booking, ticket, outbox in one tx.
+		bookingrepo.NewConfirmationRepository(pool, seatInventoryRepo, outboxRepo),
 		qrTokenSecret,
 	)
 
@@ -167,17 +180,25 @@ func main() {
 	smsBalanceSvc := sms.NewBalanceService(smsClient, redisClient)
 
 	// WebSocket gateway for live seat updates
-	wsGateway := wsgw.NewGateway(redisClient, jwtIssuer, logger)
+	wsGateway := wsgw.NewGateway(redisClient, jwtIssuer, logger, trustedHops)
+	go wsGateway.Run(ctx) // stops with the signal ctx, closing open sockets
 
 	mountRoutes(r, routeDeps{
 		Health:           health,
 		RegisterOperator: opshttp.NewRegisterHandler(registrationSvc),
+		RegisterLimit:    limitIP(ratelimit.RegisterLimit),
 		Identity: identityhttp.Deps{
 			PassengerRegistration: passengerRegistrationSvc,
 			Login:                 loginSvc,
 			MFA:                   mfaSvc,
 			Tokens:                tokenSvc,
 			Verifier:              jwtIssuer,
+			RateLimits: identityhttp.RateLimits{
+				Login:             limitIP(ratelimit.LoginLimit),
+				PassengerRegister: limitIP(ratelimit.RegisterLimit),
+				MFAVerify:         limitIP(ratelimit.MFAVerifyLimit),
+				TokenRefresh:      limitIP(ratelimit.TokenRefreshLimit),
+			},
 		},
 		Ops: opshttp.Deps{
 			Registration: registrationSvc,
@@ -200,6 +221,7 @@ func main() {
 		Booking: bookinghttp.Deps{
 			CheckoutService: checkoutSvc,
 			Verifier:        jwtIssuer,
+			CreateRateLimit: ratelimit.Middleware(authCounter, ratelimit.BookingCreateLimit, ratelimit.ByUserID),
 		},
 		SeatUpdatesWS: wsGateway.HandleSeatsSubscription,
 		Admin: adminapi.Deps{
@@ -233,6 +255,21 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
+}
+
+// trustedProxyHops reads TRUSTED_PROXY_HOPS (default 0: X-Forwarded-For is
+// ignored). Set 1 when the API sits behind exactly one proxy (Caddy).
+func trustedProxyHops(logger *slog.Logger) int {
+	v := os.Getenv("TRUSTED_PROXY_HOPS")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		logger.Error("TRUSTED_PROXY_HOPS must be a non-negative integer", "value", v)
+		os.Exit(1)
+	}
+	return n
 }
 
 func getenv(key, fallback string) string {

@@ -19,6 +19,14 @@ func TestCanTransition(t *testing.T) {
 		{"Held to Confirmed", BookingStatusHeld, BookingStatusConfirmed, true},
 		{"Held to Cancelled", BookingStatusHeld, BookingStatusCancelled, true},
 		{"Held to PaidButExpired", BookingStatusHeld, BookingStatusPaidButExpired, true},
+		{"Held to PaymentPending", BookingStatusHeld, BookingStatusPaymentPending, true},
+		{"PaymentPending to Confirmed", BookingStatusPaymentPending, BookingStatusConfirmed, true},
+		{"PaymentPending to Held", BookingStatusPaymentPending, BookingStatusHeld, true},
+
+		// A booking mid-charge cannot be cancelled or double-claimed
+		{"PaymentPending to Cancelled", BookingStatusPaymentPending, BookingStatusCancelled, false},
+		{"PaymentPending to PaymentPending", BookingStatusPaymentPending, BookingStatusPaymentPending, false},
+		{"Confirmed to PaymentPending", BookingStatusConfirmed, BookingStatusPaymentPending, false},
 
 		// Invalid transitions from Held
 		{"Held to Held", BookingStatusHeld, BookingStatusHeld, false},

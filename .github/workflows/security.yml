@@ -1,0 +1,114 @@
+# Security gates. Ported from the old monorepo-root
+# .github/workflows/phase-6-security-gates.yml (which never ran: that folder is
+# not a git repo). gofmt / vet / build / the full race test run stay in ci.yml;
+# this adds only what CI does not already check.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so new advisories against unchanged code still surface.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # scan the whole history, not just the tip
+      # The CLI rather than gitleaks-action, which needs a paid licence key on
+      # organisation repos.
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+      - name: gitleaks
+        run: gitleaks git --redact --no-banner --verbose .
+
+  static:
+    name: govulncheck + gosec + source checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          # Latest 1.26.x patch, so stdlib advisories fixed upstream do not fail
+          # govulncheck here (the Docker image builds on golang:1.26-alpine).
+          check-latest: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+      # sqlcgen: generated code (G101 false positives on SQL with "token"/
+      # "password" columns). testutil/demoseed: test & demo-data helpers only.
+      # G115 (int->int32 conversions on already-bounded values) is too noisy to
+      # gate on.
+      - name: gosec
+        run: |
+          go run github.com/securego/gosec/v2/cmd/gosec@v2.30.0 -quiet \
+            -exclude-dir=internal/platform/sqlcgen \
+            -exclude-dir=internal/platform/testutil \
+            -exclude-dir=internal/demoseed \
+            -exclude=G115 \
+            ./...
+
+      - name: No insecure secret defaults / string-built SQL
+        run: |
+          fail=0
+          if grep -rnE 'getenv\("(QR_TOKEN_SECRET|JWT_SIGNING_KEY)", *"[^"]+"' cmd internal --include='*.go'; then
+            echo "::error::secret read with a hard-coded fallback"; fail=1
+          fi
+          if grep -rnE 'fmt\.Sprintf\([^)]*(SELECT|INSERT|UPDATE|DELETE)' internal --include='*.go' \
+              | grep -vE '_test\.go|sqlcgen|txscope\.go'; then
+            echo "::error::SQL built with fmt.Sprintf (use parameters)"; fail=1
+          fi
+          exit $fail
+
+  db-security-tests:
+    name: Critical DB security tests must run (not skip)
+    # ci.yml runs these as part of `go test ./...`, but a skipped test passes
+    # silently there. Here each must report PASS. They start a throwaway
+    # Postgres via testcontainers (Docker is available on the runner).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Run RLS / ledger / seat-concurrency / outbox / ownership tests
+        env:
+          CRITICAL: >-
+            TestHoldSeatsNoOverselling
+            TestFleetRLSBlocksCrossTenantReads
+            TestRLSBlocksCrossTenantReads
+            TestLedgerEntriesAreImmutable
+            TestTrialBalanceAlwaysBalances
+            TestOutboxConcurrentPollNeverDuplicates
+            TestRelayPostsLedgerExactlyOnceAcrossCompetingWorkers
+            TestFareTamperingIsIgnored
+            TestHTTPBookingOwnership
+        run: |
+          set -o pipefail
+          pattern="^($(echo $CRITICAL | tr ' ' '|'))\$"
+          go test -race -count=1 -v -run "$pattern" ./... | tee test.log
+          if grep -q -- "--- SKIP" test.log; then
+            echo "::error::critical DB tests were skipped"; grep -- "--- SKIP" test.log; exit 1
+          fi
+          for t in $CRITICAL; do
+            grep -q -- "--- PASS: $t " test.log || { echo "::error::critical test did not run/pass: $t"; exit 1; }
+          done

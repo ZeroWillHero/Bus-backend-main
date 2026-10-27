@@ -33,6 +33,9 @@ WHERE t.status = 'scheduled'
     OR t.base_fare > sqlc.narg('cursor_price')::numeric
     OR (t.base_fare = sqlc.narg('cursor_price')::numeric AND t.id > sqlc.narg('cursor_id')::uuid)
   )
+  -- Departed (or about to depart) trips aren't bookable — see
+  -- fleet/domain.BookingCutoff.
+  AND t.departure_at > now() + interval '1 second' * sqlc.arg('booking_cutoff_secs')::int
 ORDER BY t.base_fare ASC, t.id ASC
 LIMIT $1;
 
@@ -60,5 +63,8 @@ WHERE t.status = 'scheduled'
     OR t.departure_at > sqlc.narg('cursor_departure_at')::timestamptz
     OR (t.departure_at = sqlc.narg('cursor_departure_at')::timestamptz AND t.id > sqlc.narg('cursor_id')::uuid)
   )
+  -- Departed (or about to depart) trips aren't bookable — see
+  -- fleet/domain.BookingCutoff.
+  AND t.departure_at > now() + interval '1 second' * sqlc.arg('booking_cutoff_secs')::int
 ORDER BY t.departure_at ASC, t.id ASC
 LIMIT $1;

@@ -43,12 +43,29 @@ func (r *RefreshTokenRepository) FindByHash(ctx context.Context, tokenHash strin
 	return toDomainRefreshToken(row), nil
 }
 
-func (r *RefreshTokenRepository) Revoke(ctx context.Context, id string) error {
+// Revoke revokes one token and reports whether this call did it — false
+// means it was already revoked (or doesn't exist), which is how
+// concurrent rotations of the same token are told apart.
+func (r *RefreshTokenRepository) Revoke(ctx context.Context, id string) (bool, error) {
 	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.q.RevokeRefreshToken(ctx, uid)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// RevokeAllForOperator revokes every refresh token belonging to any user of
+// operatorID — used when the operator is suspended (ops approval service).
+func (r *RefreshTokenRepository) RevokeAllForOperator(ctx context.Context, operatorID string) error {
+	oid, err := parseUUID(operatorID)
 	if err != nil {
 		return err
 	}
-	return r.q.RevokeRefreshToken(ctx, uid)
+	return r.q.RevokeAllRefreshTokensForOperator(ctx, oid)
 }
 
 func (r *RefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID string) error {

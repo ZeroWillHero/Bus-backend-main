@@ -7,6 +7,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sl-bus/backend/internal/booking/domain"
 )
 
@@ -19,6 +21,7 @@ type CheckoutService struct {
 	pricing         domain.TripPricingPort
 	paymentGateway  domain.PaymentGateway
 	outboxWriter    domain.OutboxWriter
+	confirmer       domain.BookingConfirmer
 	qrTokenSecret   []byte
 }
 
@@ -30,6 +33,7 @@ func NewCheckoutService(
 	pricing domain.TripPricingPort,
 	paymentGateway domain.PaymentGateway,
 	outboxWriter domain.OutboxWriter,
+	confirmer domain.BookingConfirmer,
 	qrTokenSecret []byte,
 ) *CheckoutService {
 	return &CheckoutService{
@@ -40,6 +44,7 @@ func NewCheckoutService(
 		pricing:         pricing,
 		paymentGateway:  paymentGateway,
 		outboxWriter:    outboxWriter,
+		confirmer:       confirmer,
 		qrTokenSecret:   qrTokenSecret,
 	}
 }
@@ -72,6 +77,9 @@ func (s *CheckoutService) CreateHold(ctx context.Context, input CreateHoldInput)
 	if len(input.Seats) == 0 {
 		return nil, domain.ErrNoSeatsSelected
 	}
+	if len(input.Seats) > domain.MaxSeatsPerBooking {
+		return nil, domain.ErrTooManySeats
+	}
 	seatNumbers := make([]string, len(input.Seats))
 	seen := make(map[string]struct{}, len(input.Seats))
 	for i, seat := range input.Seats {
@@ -80,6 +88,17 @@ func (s *CheckoutService) CreateHold(ctx context.Context, input CreateHoldInput)
 		}
 		seen[seat.SeatNumber] = struct{}{}
 		seatNumbers[i] = seat.SeatNumber
+	}
+
+	// Count-then-insert is not atomic: simultaneous requests can each see
+	// MaxActiveHoldsPerPassenger-1 and all succeed. Overshooting by a few
+	// concurrent requests is acceptable for an abuse limit; holds still expire.
+	active, err := s.bookingRepo.CountActiveHolds(ctx, input.PassengerID)
+	if err != nil {
+		return nil, err
+	}
+	if active >= domain.MaxActiveHoldsPerPassenger {
+		return nil, domain.ErrTooManyActiveHolds
 	}
 
 	fares, err := s.pricing.SeatFares(ctx, input.TripID, seatNumbers)
@@ -114,7 +133,7 @@ func (s *CheckoutService) CreateHold(ctx context.Context, input CreateHoldInput)
 	abort := func(cause error) (*domain.Booking, error) {
 		_ = s.seatHold.ReleaseSeatsForBooking(ctx, booking.ID)
 		now := time.Now()
-		_, _ = s.bookingRepo.UpdateStatus(ctx, booking.ID, domain.BookingStatusCancelled, nil, &now)
+		_, _ = s.bookingRepo.TransitionStatus(ctx, booking.ID, domain.BookingStatusHeld, domain.BookingStatusCancelled, nil, &now)
 		return nil, cause
 	}
 
@@ -156,111 +175,133 @@ func (s *CheckoutService) loadOwned(ctx context.Context, bookingID, actorID stri
 	return booking, nil
 }
 
-// ConfirmBooking transitions a held booking to confirmed after successful payment.
-// Implements MITIGATION_PLAN.md §1.3 (PaidButExpired auto-refund if hold expired).
+// paymentWindow is how long a confirm protects the seats while it charges:
+// their hold is extended to at least now()+paymentWindow so the expired-hold
+// sweep cannot free a seat mid-charge.
+const paymentWindow = 2 * time.Minute
+
+// ConfirmBooking charges a held booking and confirms it.
+//
+//  1. Only a 'held' booking with an unexpired hold can be paid. An expired hold
+//     is ErrHoldExpired: nothing has been charged, so nothing is refunded.
+//  2. held -> payment_pending is a compare-and-set, so of N concurrent confirms
+//     exactly one proceeds; the rest get ErrConcurrentUpdate and never charge.
+//  3. Before charging, every seat must still be held for this booking (and the
+//     holds are extended for the payment window). Otherwise: no charge.
+//  4. After a successful charge, seats/booking/ticket/outbox commit in ONE
+//     transaction. If that fails, the charge is refunded and the booking goes
+//     back to held.
 func (s *CheckoutService) ConfirmBooking(ctx context.Context, actorID, bookingID, paymentRef string) (*domain.Booking, error) {
 	booking, err := s.loadOwned(ctx, bookingID, actorID)
 	if err != nil {
 		return nil, err
 	}
-
 	if booking.Status != domain.BookingStatusHeld {
 		return nil, domain.ErrInvalidStatusTransition
 	}
-
-	// Check if hold has expired (mitigation 1.3)
 	if booking.HoldExpiresAt != nil && time.Now().After(*booking.HoldExpiresAt) {
-		// Hold expired — transition to PaidButExpired and auto-refund
-		now := time.Now()
-		booking, err = s.bookingRepo.UpdateStatus(ctx, bookingID, domain.BookingStatusPaidButExpired, nil, &now)
-		if err != nil {
-			return nil, err
-		}
-
-		// Trigger automatic refund (amount to be determined by ledger phase)
-		_ = s.paymentGateway.Refund(ctx, paymentRef, booking.TotalAmount, booking.Currency)
-
-		// Write outbox event for Phase 4/5
-		if err := s.outboxWriter.Write(ctx, nil, "PaidButExpired", map[string]interface{}{
-			"booking_id":       bookingID,
-			"amount":           booking.TotalAmount,
-			"currency":         booking.Currency,
-			"reason":           "hold_expired_before_payment",
-			"refund_initiated": true,
-		}); err != nil {
-			return nil, fmt.Errorf("write outbox: %w", err)
-		}
-
-		return booking, nil
+		return nil, domain.ErrHoldExpired
 	}
 
-	// Resolve the payee before charging so a failure here can't leave a charged-but-unposted booking.
+	// Resolve the payee and seats before claiming the booking, so these
+	// failures leave it untouched.
 	operatorID, err := s.pricing.TripOperatorID(ctx, booking.TripID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve trip operator: %w", err)
 	}
-
-	// Hold still valid; attempt charge (amount is the server-computed booking total)
-	result, err := s.paymentGateway.Charge(ctx, booking.TotalAmount, booking.Currency, paymentRef, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if !result.Approved {
-		// Payment declined; booking stays held for retry
-		return booking, fmt.Errorf("%w: %s", domain.ErrPaymentDeclined, result.ErrorMessage)
-	}
-
-	// Payment succeeded; confirm seats and booking
 	seats, err := s.bookingSeatRepo.FindByBookingID(ctx, bookingID)
 	if err != nil {
 		return nil, err
 	}
-
 	seatNumbers := make([]string, len(seats))
-	for i, s := range seats {
-		seatNumbers[i] = s.SeatNumber
+	for i, seat := range seats {
+		seatNumbers[i] = seat.SeatNumber
 	}
 
-	if err := s.seatHold.ConfirmSeats(ctx, booking.TripID, seatNumbers, bookingID); err != nil {
-		return nil, err
+	if _, err := s.bookingRepo.TransitionStatus(ctx, bookingID,
+		domain.BookingStatusHeld, domain.BookingStatusPaymentPending, nil, nil); err != nil {
+		return nil, err // ErrConcurrentUpdate: another request got here first
+	}
+	// From here on this request owns the booking; undo the claim even if the
+	// client goes away, and never let a cancelled ctx skip a refund.
+	bg := context.WithoutCancel(ctx)
+	backToHeld := func() {
+		if _, err := s.bookingRepo.TransitionStatus(bg, bookingID,
+			domain.BookingStatusPaymentPending, domain.BookingStatusHeld, nil, nil); err != nil {
+			slog.ErrorContext(bg, "confirm: could not return booking to held", "booking_id", bookingID, "error", err)
+		}
 	}
 
-	// Update booking to confirmed
-	now := time.Now()
-	booking, err = s.bookingRepo.UpdateStatus(ctx, bookingID, domain.BookingStatusConfirmed, &now, nil)
+	held, err := s.seatHold.ExtendHoldForBooking(ctx, bookingID, paymentWindow)
 	if err != nil {
+		backToHeld()
 		return nil, err
 	}
-
-	// Issue ticket with QR token
-	qrToken := domain.GenerateQRToken(bookingID, s.qrTokenSecret)
-	ticket := &domain.Ticket{
-		BookingID: bookingID,
-		QRToken:   qrToken,
+	if held != len(seatNumbers) || len(seatNumbers) == 0 {
+		// A seat's hold lapsed (and may already belong to someone else): this
+		// booking can never be fulfilled. Cancel it via held (cancel is only
+		// allowed from held) and free whatever seats it still has.
+		backToHeld()
+		now := time.Now()
+		if _, err := s.bookingRepo.TransitionStatus(bg, bookingID,
+			domain.BookingStatusHeld, domain.BookingStatusCancelled, nil, &now); err == nil {
+			_ = s.seatHold.ReleaseSeatsForBooking(bg, bookingID)
+		}
+		return nil, domain.ErrHoldExpired
 	}
-	ticket, err = s.ticketRepo.Create(ctx, ticket)
+
+	// The amount is the server-computed booking total.
+	result, err := s.paymentGateway.Charge(ctx, booking.TotalAmount, booking.Currency, paymentRef, nil)
 	if err != nil {
+		backToHeld()
 		return nil, err
 	}
-
-	// Write outbox event for Phase 4 (ledger posting) and Phase 5 (SMS/email)
-	if err := s.outboxWriter.Write(ctx, nil, "BookingConfirmed", map[string]interface{}{
-		"booking_id":   bookingID,
-		"trip_id":      booking.TripID,
-		"operator_id":  operatorID,
-		"passenger_id": booking.PassengerID,
-		"amount":       booking.TotalAmount,
-		"currency":     booking.Currency,
-		"ticket_id":    ticket.ID,
-	}); err != nil {
-		return nil, fmt.Errorf("write outbox: %w", err)
+	if !result.Approved {
+		backToHeld()
+		booking.Status = domain.BookingStatusHeld
+		return booking, fmt.Errorf("%w: %s", domain.ErrPaymentDeclined, result.ErrorMessage)
 	}
 
-	return booking, nil
+	ticketID := uuid.NewString()
+	confirmed, _, err := s.confirmer.CommitConfirmation(bg, domain.ConfirmCommit{
+		BookingID:   bookingID,
+		TripID:      booking.TripID,
+		SeatNumbers: seatNumbers,
+		ConfirmedAt: time.Now(),
+		TicketID:    ticketID,
+		QRToken:     domain.GenerateQRToken(bookingID, s.qrTokenSecret),
+		EventType:   "BookingConfirmed", // Phase 4 ledger posting, Phase 5 SMS/email
+		Payload: map[string]interface{}{
+			"booking_id":   bookingID,
+			"trip_id":      booking.TripID,
+			"operator_id":  operatorID,
+			"passenger_id": booking.PassengerID,
+			"amount":       booking.TotalAmount,
+			"currency":     booking.Currency,
+			"ticket_id":    ticketID,
+		},
+	})
+	if err != nil {
+		// Charged but not confirmed. Nothing was written (single tx), so give
+		// the money back. TODO: durable recovery (a refund outbox/reconciler)
+		// for when this refund itself fails.
+		slog.ErrorContext(bg, "CHARGED BUT NOT CONFIRMED: confirm transaction failed after successful charge; refunding",
+			"booking_id", bookingID, "payment_ref", paymentRef, "transaction_id", result.TransactionID,
+			"amount", booking.TotalAmount, "error", err)
+		if rerr := s.paymentGateway.Refund(bg, result.TransactionID, booking.TotalAmount, booking.Currency); rerr != nil {
+			slog.ErrorContext(bg, "REFUND FAILED after confirm rollback: manual refund required",
+				"booking_id", bookingID, "payment_ref", paymentRef, "transaction_id", result.TransactionID,
+				"amount", booking.TotalAmount, "error", rerr)
+		}
+		backToHeld()
+		return nil, fmt.Errorf("confirm booking (payment refunded): %w", err)
+	}
+	return confirmed, nil
 }
 
 // CancelBooking transitions a held booking to cancelled and releases its seats.
+// The cancel is a compare-and-set from the status that was read, so it cannot
+// cancel a booking a concurrent confirm has just claimed (payment_pending).
 func (s *CheckoutService) CancelBooking(ctx context.Context, actorID, bookingID string) (*domain.Booking, error) {
 	booking, err := s.loadOwned(ctx, bookingID, actorID)
 	if err != nil {
@@ -273,14 +314,16 @@ func (s *CheckoutService) CancelBooking(ctx context.Context, actorID, bookingID 
 	// Captured BEFORE the update: after it, booking.Status is already 'cancelled'.
 	wasConfirmed := booking.Status == domain.BookingStatusConfirmed
 
-	// Free only this booking's seats (never a seat someone else re-held after expiry).
-	if err := s.seatHold.ReleaseSeatsForBooking(ctx, bookingID); err != nil {
+	now := time.Now()
+	booking, err = s.bookingRepo.TransitionStatus(ctx, bookingID, booking.Status, domain.BookingStatusCancelled, nil, &now)
+	if err != nil {
 		return nil, err
 	}
 
-	now := time.Now()
-	booking, err = s.bookingRepo.UpdateStatus(ctx, bookingID, domain.BookingStatusCancelled, nil, &now)
-	if err != nil {
+	// Free only this booking's seats (never a seat someone else re-held after
+	// expiry). If this fails the seats stay held for a cancelled booking until
+	// their hold expires and the sweep frees them.
+	if err := s.seatHold.ReleaseSeatsForBooking(ctx, bookingID); err != nil {
 		return nil, err
 	}
 
@@ -330,11 +373,15 @@ func (s *CheckoutService) CheckIn(ctx context.Context, operatorID, qrToken strin
 	if err != nil {
 		return nil, domain.ErrTicketNotFound
 	}
-	tripOperatorID, err := s.pricing.TripOperatorID(ctx, booking.TripID)
-	if err != nil || operatorID == "" || tripOperatorID != operatorID {
+	trip, err := s.pricing.TripSchedule(ctx, booking.TripID)
+	if err != nil || operatorID == "" || trip.OperatorID != operatorID {
 		return nil, domain.ErrTicketNotFound
 	}
 
+	// Only now (caller is the trip's operator) reveal trip state and timing.
+	if err := domain.CheckInAllowed(trip, time.Now()); err != nil {
+		return nil, err
+	}
 	if ticket.CheckedInAt != nil {
 		return nil, domain.ErrAlreadyCheckedIn
 	}

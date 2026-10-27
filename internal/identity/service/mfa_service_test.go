@@ -16,11 +16,12 @@ import (
 // methods these tests never call unimplemented (they'd panic if reached).
 type fakeUserRepo struct {
 	domain.UserRepository
-	users map[string]*domain.User
+	users    map[string]*domain.User
+	lastStep map[string]int64
 }
 
 func newFakeUserRepo(users ...*domain.User) *fakeUserRepo {
-	r := &fakeUserRepo{users: map[string]*domain.User{}}
+	r := &fakeUserRepo{users: map[string]*domain.User{}, lastStep: map[string]int64{}}
 	for _, u := range users {
 		r.users[u.ID] = u
 	}
@@ -39,6 +40,14 @@ func (r *fakeUserRepo) FindByID(_ context.Context, id string) (*domain.User, err
 func (r *fakeUserRepo) SetMFASecret(_ context.Context, id string, secret string) error {
 	r.users[id].MFATOTPSecret = secret
 	return nil
+}
+
+func (r *fakeUserRepo) ClaimMFAStep(_ context.Context, id string, step int64) (bool, error) {
+	if last, ok := r.lastStep[id]; ok && last >= step {
+		return false, nil
+	}
+	r.lastStep[id] = step
+	return true, nil
 }
 
 func (r *fakeUserRepo) Create(_ context.Context, u *domain.User) (*domain.User, error) {
@@ -219,4 +228,49 @@ func issue(t *testing.T, s PreAuthStore, userID, fingerprint, info string) strin
 		t.Fatalf("Issue: %v", err)
 	}
 	return token
+}
+
+func codeAt(t *testing.T, secret string, at time.Time) string {
+	t.Helper()
+	code, err := totp.GenerateCode(secret, at)
+	if err != nil {
+		t.Fatalf("GenerateCode: %v", err)
+	}
+	return code
+}
+
+func TestVerifyMFARejectsAReplayedCode(t *testing.T) {
+	ctx := context.Background()
+	secret, _, _ := auth.GenerateTOTPSecret("ann@example.com")
+	f := newMFAFixture(&domain.User{ID: "u1", Email: "ann@example.com", Role: domain.RolePassenger, MFATOTPSecret: secret})
+	code := currentCode(t, secret)
+
+	if _, err := f.svc.VerifyMFA(ctx, issue(t, f.preAuth, "u1", "", "test"), code); err != nil {
+		t.Fatalf("first use: %v", err)
+	}
+	if _, err := f.svc.VerifyMFA(ctx, issue(t, f.preAuth, "u1", "", "test"), code); err != domain.ErrInvalidMFACode {
+		t.Fatalf("replayed code error = %v, want ErrInvalidMFACode", err)
+	}
+	if n, _ := f.svc.failures.Count(ctx, mfaFailureKey("u1")); n != 1 {
+		t.Fatalf("failure count after replay = %d, want 1", n)
+	}
+}
+
+func TestVerifyMFARejectsAnOlderStepAfterANewerOne(t *testing.T) {
+	ctx := context.Background()
+	secret, _, _ := auth.GenerateTOTPSecret("ann@example.com")
+	f := newMFAFixture(&domain.User{ID: "u1", Email: "ann@example.com", Role: domain.RolePassenger, MFATOTPSecret: secret})
+	now := time.Now()
+	older := codeAt(t, secret, now.Add(-auth.TOTPPeriod*time.Second))
+	newer := codeAt(t, secret, now)
+	if older == newer {
+		t.Skip("adjacent steps produced the same code")
+	}
+
+	if _, err := f.svc.VerifyMFA(ctx, issue(t, f.preAuth, "u1", "", "test"), newer); err != nil {
+		t.Fatalf("newer code: %v", err)
+	}
+	if _, err := f.svc.VerifyMFA(ctx, issue(t, f.preAuth, "u1", "", "test"), older); err != domain.ErrInvalidMFACode {
+		t.Fatalf("older code after newer error = %v, want ErrInvalidMFACode", err)
+	}
 }

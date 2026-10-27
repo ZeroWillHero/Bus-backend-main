@@ -111,11 +111,25 @@ func (s *MFAService) VerifyMFA(ctx context.Context, preAuthToken, totpCode strin
 	if enrolling {
 		secret = attempt.PendingMFASecret
 	}
-	if secret == "" || !auth.VerifyTOTPCode(secret, totpCode) {
+	invalid := func() (*TokenPair, error) {
 		if _, err := s.failures.Incr(ctx, mfaFailureKey(user.ID), MFAFailureWindow); err != nil {
 			return nil, err
 		}
 		return nil, domain.ErrInvalidMFACode
+	}
+	if secret == "" {
+		return invalid()
+	}
+	step, ok := auth.MatchTOTPStep(secret, totpCode, time.Now())
+	if !ok {
+		return invalid()
+	}
+	// Replay protection: each time step's code is accepted once, and never
+	// one older than the last accepted. A replay counts as a failure.
+	if claimed, err := s.userRepo.ClaimMFAStep(ctx, user.ID, step); err != nil {
+		return nil, err
+	} else if !claimed {
+		return invalid()
 	}
 	// Single use: a concurrent request that verified the same code first
 	// has already consumed the token.

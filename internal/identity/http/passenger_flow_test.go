@@ -22,7 +22,16 @@ import (
 // anything else.
 type memUsers struct {
 	domain.UserRepository
-	byID map[string]*domain.User
+	byID     map[string]*domain.User
+	lastStep map[string]int64
+}
+
+func (m *memUsers) ClaimMFAStep(_ context.Context, id string, step int64) (bool, error) {
+	if last, ok := m.lastStep[id]; ok && last >= step {
+		return false, nil
+	}
+	m.lastStep[id] = step
+	return true, nil
 }
 
 func (m *memUsers) find(match func(*domain.User) bool) (*domain.User, error) {
@@ -82,7 +91,7 @@ func (memRefreshTokens) Create(_ context.Context, userID, tokenHash, deviceInfo 
 }
 
 func newPassengerTestRouter() http.Handler {
-	users := &memUsers{byID: map[string]*domain.User{}}
+	users := &memUsers{byID: map[string]*domain.User{}, lastStep: map[string]int64{}}
 	devices := &memTrustedDevices{until: map[string]time.Time{}}
 	preAuth := service.NewMemoryPreAuthStore()
 	failures := ratelimit.NewMemoryCounter()

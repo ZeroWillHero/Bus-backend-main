@@ -81,4 +81,8 @@ type UserRepository interface {
 	ResetLockout(ctx context.Context, id string) error
 	SetMFASecret(ctx context.Context, id string, secret string) error
 	UpdatePassword(ctx context.Context, id string, passwordHash string) error
+	// ClaimMFAStep records step as the user's last accepted TOTP time
+	// step, but only if it's newer than the one stored; false means the
+	// code's step was already used (or an older one), i.e. a replay.
+	ClaimMFAStep(ctx context.Context, id string, step int64) (bool, error)
 }

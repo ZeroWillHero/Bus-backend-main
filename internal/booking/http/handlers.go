@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -67,15 +68,11 @@ func unauthorized(w http.ResponseWriter) {
 	writeErr(w, http.StatusUnauthorized, "AUTH_TOKEN_INVALID", "Please sign in again.")
 }
 
-func badRequest(w http.ResponseWriter) {
-	writeErr(w, http.StatusBadRequest, "VALIDATION_FAILED", "Request body is not valid JSON.")
-}
-
 func NewCreateBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateBookingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			badRequest(w)
+			httpx.WriteDecodeError(w, err)
 			return
 		}
 
@@ -107,6 +104,12 @@ func NewCreateBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 			switch {
 			case errors.Is(err, domain.ErrSeatUnavailable):
 				writeErr(w, http.StatusConflict, "BOOKING_SEAT_UNAVAILABLE", "One or more of those seats were just taken.")
+			case errors.Is(err, domain.ErrTripNotBookable):
+				writeErr(w, http.StatusConflict, "BOOKING_TRIP_NOT_BOOKABLE", "This trip has departed or is no longer open for booking.")
+			case errors.Is(err, domain.ErrTooManySeats):
+				writeErr(w, http.StatusUnprocessableEntity, "BOOKING_TOO_MANY_SEATS", fmt.Sprintf("At most %d seats per booking.", domain.MaxSeatsPerBooking))
+			case errors.Is(err, domain.ErrTooManyActiveHolds):
+				writeErr(w, http.StatusTooManyRequests, "BOOKING_TOO_MANY_HOLDS", "You already have too many seats on hold. Pay for or cancel one first.")
 			case errors.Is(err, domain.ErrUnknownSeat), errors.Is(err, domain.ErrDuplicateSeat), errors.Is(err, domain.ErrNoSeatsSelected):
 				writeErr(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Invalid seat selection.")
 			default:
@@ -196,7 +199,7 @@ func NewConfirmBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req ConfirmBookingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			badRequest(w)
+			httpx.WriteDecodeError(w, err)
 			return
 		}
 		actor, ok := actorID(r)
@@ -214,6 +217,10 @@ func NewConfirmBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 				writeErr(w, http.StatusNotFound, "BOOKING_NOT_FOUND", "Booking not found.")
 			case errors.Is(err, domain.ErrInvalidStatusTransition):
 				writeErr(w, http.StatusConflict, "BOOKING_INVALID_STATE", "This booking can no longer be paid.")
+			case errors.Is(err, domain.ErrConcurrentUpdate):
+				writeErr(w, http.StatusConflict, "BOOKING_CONFLICT", "This booking is already being paid for.")
+			case errors.Is(err, domain.ErrSeatUnavailable):
+				writeErr(w, http.StatusConflict, "BOOKING_SEAT_UNAVAILABLE", "One or more of your seats are no longer held.")
 			case errors.Is(err, domain.ErrPaymentDeclined):
 				writeErr(w, http.StatusPaymentRequired, "PAYMENT_DECLINED", "Payment failed.")
 			default:
@@ -240,6 +247,8 @@ func NewCancelBookingHandler(svc *service.CheckoutService) http.HandlerFunc {
 				writeErr(w, http.StatusNotFound, "BOOKING_NOT_FOUND", "Booking not found.")
 			case errors.Is(err, domain.ErrInvalidStatusTransition):
 				writeErr(w, http.StatusConflict, "BOOKING_NOT_CANCELLABLE", "This booking can no longer be cancelled.")
+			case errors.Is(err, domain.ErrConcurrentUpdate):
+				writeErr(w, http.StatusConflict, "BOOKING_CONFLICT", "This booking was changed by another request.")
 			default:
 				writeErr(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to cancel booking.")
 			}
@@ -264,6 +273,10 @@ func NewCheckInHandler(svc *service.CheckoutService) http.HandlerFunc {
 				writeErr(w, http.StatusBadRequest, "INVALID_QR_TOKEN", "This QR code is not valid.")
 			case errors.Is(err, domain.ErrAlreadyCheckedIn):
 				writeErr(w, http.StatusConflict, "TICKET_ALREADY_CHECKED_IN", "This ticket was already used.")
+			case errors.Is(err, domain.ErrTicketTripCancelled):
+				writeErr(w, http.StatusConflict, "TICKET_TRIP_CANCELLED", "This ticket's trip was cancelled.")
+			case errors.Is(err, domain.ErrTicketNotValidNow):
+				writeErr(w, http.StatusConflict, "TICKET_NOT_VALID_NOW", "This ticket can't be checked in at this time.")
 			case errors.Is(err, domain.ErrTicketNotFound):
 				writeErr(w, http.StatusNotFound, "TICKET_NOT_FOUND", "Ticket not found.")
 			default:

@@ -17,19 +17,40 @@ import (
 	"github.com/sl-bus/backend/internal/platform/testutil"
 )
 
-// recordingGateway approves everything and remembers what it was asked to charge.
+// recordingGateway approves everything (unless decline is set) and remembers
+// what it was asked to charge and refund. onCharge, if set, runs inside Charge.
 type recordingGateway struct {
-	mu      sync.Mutex
-	charges []float64
+	mu       sync.Mutex
+	charges  []float64
+	refunds  []string // transaction ids
+	decline  bool
+	onCharge func()
 }
 
 func (g *recordingGateway) Charge(_ context.Context, amount float64, _, ref string, _ map[string]interface{}) (*domain.PaymentResult, error) {
+	if g.onCharge != nil {
+		g.onCharge()
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.charges = append(g.charges, amount)
-	return &domain.PaymentResult{Gateway: "test", TransactionID: ref, Approved: true}, nil
+	if g.decline {
+		return &domain.PaymentResult{Gateway: "test", Approved: false, ErrorMessage: "card declined"}, nil
+	}
+	return &domain.PaymentResult{Gateway: "test", TransactionID: "txn-" + ref, Approved: true}, nil
 }
-func (g *recordingGateway) Refund(context.Context, string, float64, string) error { return nil }
+func (g *recordingGateway) Refund(_ context.Context, txnID string, _ float64, _ string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.refunds = append(g.refunds, txnID)
+	return nil
+}
+
+func (g *recordingGateway) counts() (charges, refunds int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.charges), len(g.refunds)
+}
 
 type env struct {
 	ctx   context.Context
@@ -40,16 +61,26 @@ type env struct {
 }
 
 func newEnv(t *testing.T) *env {
+	return newEnvWith(t, nil)
+}
+
+// newEnvWith lets a test swap the seat side of the confirm transaction.
+func newEnvWith(t *testing.T, seatTx bookingrepo.SeatTxConfirmer) *env {
 	t.Helper()
 	pool := testutil.NewTestPool(t)
 	seats := fleetrepo.NewSeatInventoryRepository(pool, nil)
+	if seatTx == nil {
+		seatTx = seats
+	}
 	gw := &recordingGateway{}
+	outbox := bookingrepo.NewOutboxRepository(pool)
 	svc := service.NewCheckoutService(
 		bookingrepo.NewBookingRepository(pool),
 		bookingrepo.NewBookingSeatRepository(pool),
 		bookingrepo.NewTicketRepository(pool),
 		seats, seats, gw,
-		bookingrepo.NewOutboxRepository(pool),
+		outbox,
+		bookingrepo.NewConfirmationRepository(pool, seatTx, outbox),
 		[]byte("test-qr-secret"),
 	)
 	return &env{ctx: context.Background(), pool: pool, svc: svc, gw: gw, seats: seats}

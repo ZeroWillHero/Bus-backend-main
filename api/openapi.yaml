@@ -81,6 +81,10 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/PlatformRateLimited'
   /v1/auth/passenger/register:
     post:
       tags:
@@ -112,6 +116,8 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/PlatformRateLimited'
   /v1/auth/login:
     post:
       tags:
@@ -138,6 +144,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/PlatformRateLimited'
   /v1/auth/mfa/enroll:
     post:
       tags:
@@ -193,12 +201,15 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/PlatformRateLimited'
   /v1/auth/token/refresh:
     post:
       tags:
       - Auth
       operationId: refreshToken
       summary: Exchange a refresh token for a new token pair
+      description: The presented token is single-use. Presenting one that was already rotated or revoked (but not expired) is treated as theft — every session of that user is revoked and the response is `401 AUTH_TOKEN_INVALID`. The account is re-checked on each refresh — a locked account gets `422 AUTH_ACCOUNT_LOCKED` and staff of a suspended operator `422 OPS_OPERATOR_SUSPENDED`.
       security: []
       requestBody:
         required: true
@@ -217,6 +228,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/PlatformRateLimited'
   /v1/auth/logout:
     post:
       tags:
@@ -1354,13 +1367,24 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
-          description: '`BOOKING_SEAT_UNAVAILABLE`'
+          description: '`BOOKING_SEAT_UNAVAILABLE`, or `BOOKING_TRIP_NOT_BOOKABLE` (trip cancelled, completed, departed or within the booking cutoff)'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '422':
-          description: '`VALIDATION_FAILED` (unknown/duplicate/no seats)'
+          description: '`VALIDATION_FAILED` (unknown/duplicate/no seats), or `BOOKING_TOO_MANY_SEATS` (more than 10 seats in one booking)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: '`BOOKING_TOO_MANY_HOLDS` (the passenger already has 3 unexpired holds; pay for or cancel one first), or `PLATFORM_RATE_LIMITED` (more than 20 create attempts per user in 10 minutes; see the `Retry-After` header)'
+          headers:
+            Retry-After:
+              description: Seconds until the rate-limit window resets (sent with `PLATFORM_RATE_LIMITED` only).
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -1474,13 +1498,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
-          description: '`BOOKING_INVALID_STATE` (not in the held state)'
+          description: '`BOOKING_INVALID_STATE` (not in the held state), `BOOKING_CONFLICT`
+            (another confirm of this booking is in progress), or `BOOKING_SEAT_UNAVAILABLE`
+            (a seat was lost; any charge was refunded)'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '410':
-          description: '`BOOKING_HOLD_EXPIRED`'
+          description: '`BOOKING_HOLD_EXPIRED` (nothing is charged)'
           content:
             application/json:
               schema:
@@ -1517,7 +1543,7 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
           description: '`BOOKING_NOT_CANCELLABLE`. Only held bookings can be cancelled; a confirmed booking is final until a refund
-            policy exists.'
+            policy exists. `BOOKING_CONFLICT` if the booking changed (e.g. payment started) while cancelling.'
           content:
             application/json:
               schema:
@@ -1557,7 +1583,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
-          description: '`TICKET_ALREADY_CHECKED_IN`'
+          description: '`TICKET_ALREADY_CHECKED_IN`, `TICKET_TRIP_CANCELLED` (the trip was cancelled), or `TICKET_NOT_VALID_NOW`
+            (outside departure -2h .. +6h). Only reported to staff of the trip''s operator.'
           content:
             application/json:
               schema:
@@ -1707,6 +1734,33 @@ components:
             error:
               code: AUTH_OTP_RATE_LIMITED
               message: Too many requests.
+    PayloadTooLarge:
+      description: Request body exceeds the 1 MiB limit.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: PLATFORM_PAYLOAD_TOO_LARGE
+              message: Request body is too large.
+    PlatformRateLimited:
+      description: Per-client rate limit exceeded. Retry after the number of seconds in `Retry-After`.
+      headers:
+        Retry-After:
+          description: Seconds until the rate-limit window resets.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: PLATFORM_RATE_LIMITED
+              message: Too many requests. Please try again later.
   schemas:
     Meta:
       type: object
@@ -1854,6 +1908,8 @@ components:
           type: string
         registrationDocUrl:
           type: string
+          maxLength: 716800
+          description: Optional. An `https://` URL, or the document image inline as `data:image/(png|jpeg|webp);base64,...`. At most 716800 characters (700 KiB).
         password:
           type: string
           format: password
@@ -3082,6 +3138,7 @@ components:
       type: string
       enum:
       - held
+      - payment_pending
       - confirmed
       - cancelled
       - paid_but_expired
@@ -3294,12 +3351,16 @@ components:
         tripId:
           type: string
           format: uuid
+        bookable:
+          type: boolean
+          description: '`false` once the trip has departed or is within the booking cutoff; the seat map is still returned but holds are refused with `BOOKING_TRIP_NOT_BOOKABLE`.'
         seats:
           type: array
           items:
             $ref: '#/components/schemas/TripSeat'
       required:
       - tripId
+      - bookable
       - seats
     TripSeatMapResponse:
       type: object

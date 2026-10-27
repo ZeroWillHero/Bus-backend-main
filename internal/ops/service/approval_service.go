@@ -6,6 +6,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	identityrepo "github.com/sl-bus/backend/internal/identity/repository"
 	"github.com/sl-bus/backend/internal/ops/domain"
 	opsrepo "github.com/sl-bus/backend/internal/ops/repository"
 	"github.com/sl-bus/backend/internal/platform/auth"
@@ -48,7 +49,16 @@ func (s *ApprovalService) transition(ctx context.Context, operatorID string, to 
 			return domain.ErrInvalidStatusTransition
 		}
 		operator, err = repo.UpdateStatus(ctx, operatorID, to)
-		return err
+		if err != nil {
+			return err
+		}
+		if to == domain.StatusSuspended {
+			// End every live session of the operator's staff in the same
+			// tx; their next refresh would be refused anyway, but this
+			// also clears the session list.
+			return identityrepo.NewRefreshTokenRepository(tx).RevokeAllForOperator(ctx, operatorID)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err

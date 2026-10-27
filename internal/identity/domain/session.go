@@ -22,7 +22,9 @@ func (t *RefreshToken) Active(now time.Time) bool {
 type RefreshTokenRepository interface {
 	Create(ctx context.Context, userID, tokenHash, deviceInfo string, expiresAt time.Time) (*RefreshToken, error)
 	FindByHash(ctx context.Context, tokenHash string) (*RefreshToken, error)
-	Revoke(ctx context.Context, id string) error
+	// Revoke revokes the token if it isn't already, reporting whether
+	// this call changed it.
+	Revoke(ctx context.Context, id string) (bool, error)
 	RevokeAllForUser(ctx context.Context, userID string) error
 	ListActiveForUser(ctx context.Context, userID string) ([]*RefreshToken, error)
 }

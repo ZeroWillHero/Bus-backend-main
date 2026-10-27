@@ -1,6 +1,8 @@
 package http
 
 import (
+	"net/http"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sl-bus/backend/internal/booking/service"
@@ -12,6 +14,9 @@ type Deps struct {
 	// Verifier validates the bearer token. Required: without auth.Middleware the
 	// RequireRole gates below see no claims and reject every request.
 	Verifier auth.Verifier
+	// CreateRateLimit optionally limits POST /bookings; it runs after the
+	// auth gate so it can key on the user id. nil = unlimited.
+	CreateRateLimit func(http.Handler) http.Handler
 }
 
 func NewRouter(deps Deps) chi.Router {
@@ -21,7 +26,11 @@ func NewRouter(deps Deps) chi.Router {
 	r.Route("/bookings", func(r chi.Router) {
 		r.Use(auth.Middleware(deps.Verifier), auth.RequireRole(auth.RolePassenger))
 		r.Get("/", NewListBookingsHandler(deps.CheckoutService))
-		r.Post("/", NewCreateBookingHandler(deps.CheckoutService))
+		create := http.Handler(NewCreateBookingHandler(deps.CheckoutService))
+		if deps.CreateRateLimit != nil {
+			create = deps.CreateRateLimit(create)
+		}
+		r.Method(http.MethodPost, "/", create)
 		r.Get("/{id}", NewGetBookingHandler(deps.CheckoutService))
 		r.Get("/{id}/ticket", NewGetTicketHandler(deps.CheckoutService))
 		r.Post("/{id}/confirm", NewConfirmBookingHandler(deps.CheckoutService))

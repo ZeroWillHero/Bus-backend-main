@@ -35,6 +35,7 @@ WHERE t.status = 'scheduled'
     OR t.departure_at > $8::timestamptz
     OR (t.departure_at = $8::timestamptz AND t.id > $9::uuid)
   )
+  AND t.departure_at > now() + interval '1 second' * $10::int
 ORDER BY t.departure_at ASC, t.id ASC
 LIMIT $1
 `
@@ -49,6 +50,7 @@ type SearchTripsByDepartureParams struct {
 	MaxPrice          pgtype.Numeric     `json:"max_price"`
 	CursorDepartureAt pgtype.Timestamptz `json:"cursor_departure_at"`
 	CursorID          pgtype.UUID        `json:"cursor_id"`
+	BookingCutoffSecs int32              `json:"booking_cutoff_secs"`
 }
 
 type SearchTripsByDepartureRow struct {
@@ -78,6 +80,7 @@ func (q *Queries) SearchTripsByDeparture(ctx context.Context, arg SearchTripsByD
 		arg.MaxPrice,
 		arg.CursorDepartureAt,
 		arg.CursorID,
+		arg.BookingCutoffSecs,
 	)
 	if err != nil {
 		return nil, err
@@ -136,20 +139,22 @@ WHERE t.status = 'scheduled'
     OR t.base_fare > $8::numeric
     OR (t.base_fare = $8::numeric AND t.id > $9::uuid)
   )
+  AND t.departure_at > now() + interval '1 second' * $10::int
 ORDER BY t.base_fare ASC, t.id ASC
 LIMIT $1
 `
 
 type SearchTripsByPriceParams struct {
-	Limit       int32          `json:"limit"`
-	Origin      string         `json:"origin"`
-	Destination string         `json:"destination"`
-	TravelDate  pgtype.Date    `json:"travel_date"`
-	BusClass    pgtype.Text    `json:"bus_class"`
-	MinPrice    pgtype.Numeric `json:"min_price"`
-	MaxPrice    pgtype.Numeric `json:"max_price"`
-	CursorPrice pgtype.Numeric `json:"cursor_price"`
-	CursorID    pgtype.UUID    `json:"cursor_id"`
+	Limit             int32          `json:"limit"`
+	Origin            string         `json:"origin"`
+	Destination       string         `json:"destination"`
+	TravelDate        pgtype.Date    `json:"travel_date"`
+	BusClass          pgtype.Text    `json:"bus_class"`
+	MinPrice          pgtype.Numeric `json:"min_price"`
+	MaxPrice          pgtype.Numeric `json:"max_price"`
+	CursorPrice       pgtype.Numeric `json:"cursor_price"`
+	CursorID          pgtype.UUID    `json:"cursor_id"`
+	BookingCutoffSecs int32          `json:"booking_cutoff_secs"`
 }
 
 type SearchTripsByPriceRow struct {
@@ -189,6 +194,7 @@ func (q *Queries) SearchTripsByPrice(ctx context.Context, arg SearchTripsByPrice
 		arg.MaxPrice,
 		arg.CursorPrice,
 		arg.CursorID,
+		arg.BookingCutoffSecs,
 	)
 	if err != nil {
 		return nil, err

@@ -36,7 +36,7 @@ func NewRegisterHandler(reg *service.RegistrationService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req registerRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpx.WriteError(w, http.StatusBadRequest, httpx.APIError{Code: "VALIDATION_FAILED", Message: "Request body is not valid JSON."}, nil)
+			httpx.WriteDecodeError(w, err)
 			return
 		}
 		if err := validate.Struct(&req); err != nil {

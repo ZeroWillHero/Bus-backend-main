@@ -52,8 +52,8 @@ func NewScoped(pool *pgxpool.Pool, scope Scope) *Scoped {
 	return &Scoped{pool: pool, scope: scope}
 }
 
-func (s *Scoped) claims(ctx context.Context) *auth.Claims {
-	if s.scope == ScopeCaller {
+func claimsFor(ctx context.Context, scope Scope) *auth.Claims {
+	if scope == ScopeCaller {
 		if c, ok := auth.FromContext(ctx); ok {
 			return c
 		}
@@ -61,23 +61,63 @@ func (s *Scoped) claims(ctx context.Context) *auth.Claims {
 	return systemClaims
 }
 
-func (s *Scoped) begin(ctx context.Context) (pgx.Tx, error) {
-	op, user, role, err := scopeValues(s.claims(ctx))
+// applyScope sets the RLS identity for the rest of tx (transaction-local).
+func applyScope(ctx context.Context, tx pgx.Tx, scope Scope) error {
+	op, user, role, err := scopeValues(claimsFor(ctx, scope))
 	if err != nil {
-		return nil, err
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("db: begin tx: %w", err)
+		return err
 	}
 	if _, err := tx.Exec(ctx,
 		`SELECT set_config('app.current_operator_id', $1, true),
 		        set_config('app.current_user_id', $2, true),
 		        set_config('app.current_role', $3, true)`, op, user, role); err != nil {
+		return fmt.Errorf("db: set tenant context: %w", err)
+	}
+	return nil
+}
+
+func beginScoped(ctx context.Context, pool *pgxpool.Pool, scope Scope) (pgx.Tx, error) {
+	if _, _, _, err := scopeValues(claimsFor(ctx, scope)); err != nil {
+		return nil, err
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("db: begin tx: %w", err)
+	}
+	if err := applyScope(ctx, tx, scope); err != nil {
 		_ = tx.Rollback(ctx)
-		return nil, fmt.Errorf("db: set tenant context: %w", err)
+		return nil, err
 	}
 	return tx, nil
+}
+
+func (s *Scoped) begin(ctx context.Context) (pgx.Tx, error) {
+	return beginScoped(ctx, s.pool, s.scope)
+}
+
+// InScopedTx runs fn inside ONE transaction whose RLS identity is scope (the
+// same identity a Scoped querier with that scope would use), committing if fn
+// returns nil and rolling back otherwise. Use it when several statements must
+// commit or fail together; UseScope switches identity mid-transaction.
+func InScopedTx(ctx context.Context, pool *pgxpool.Pool, scope Scope, fn func(tx pgx.Tx) error) error {
+	tx, err := beginScoped(ctx, pool, scope)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: commit tx: %w", err)
+	}
+	return nil
+}
+
+// UseScope switches the RLS identity of the remaining statements in tx (the
+// settings are transaction-local, so nothing leaks past commit/rollback).
+func UseScope(ctx context.Context, tx pgx.Tx, scope Scope) error {
+	return applyScope(ctx, tx, scope)
 }
 
 func (s *Scoped) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {

@@ -23,11 +23,12 @@ const usersEmailUniqueConstraint = "users_email_key"
 // DBTX — either the shared pool or a specific pgx.Tx — so the same
 // implementation works for both plain and transaction-scoped calls.
 type UserRepository struct {
-	q *sqlcgen.Queries
+	db sqlcgen.DBTX
+	q  *sqlcgen.Queries
 }
 
 func NewUserRepository(db sqlcgen.DBTX) *UserRepository {
-	return &UserRepository{q: sqlcgen.New(db)}
+	return &UserRepository{db: db, q: sqlcgen.New(db)}
 }
 
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
@@ -138,6 +139,27 @@ func (r *UserRepository) UpdatePassword(ctx context.Context, id string, password
 		return err
 	}
 	return r.q.UpdateUserPassword(ctx, sqlcgen.UpdateUserPasswordParams{ID: uid, PasswordHash: text(passwordHash)})
+}
+
+// claimMFAStepSQL is written here rather than in db/queries because sqlc
+// isn't available to regenerate sqlcgen.IdentityUser (and every SELECT *
+// scan) for the new mfa_last_used_step column (000012).
+const claimMFAStepSQL = `
+UPDATE identity.users
+SET mfa_last_used_step = $2,
+    updated_at = now()
+WHERE id = $1 AND (mfa_last_used_step IS NULL OR mfa_last_used_step < $2)`
+
+func (r *UserRepository) ClaimMFAStep(ctx context.Context, id string, step int64) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	tag, err := r.db.Exec(ctx, claimMFAStepSQL, uid, step)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func toDomainUser(row sqlcgen.IdentityUser) *domain.User {

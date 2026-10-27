@@ -52,8 +52,14 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Redis carries live seat updates to WS clients (expired-hold sweeps
+	// publish 'available') and the SMS balance cache.
+	redisClient := redis.NewClient(&redis.Options{Addr: getenv("REDIS_ADDR", "localhost:6379")})
+	defer func() { _ = redisClient.Close() }()
+
 	// Wire repositories for Phase 3/4 background tasks
-	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool, nil) // Redis not needed for cleanup
+	seatInventoryRepo := fleetrepo.NewSeatInventoryRepository(pool, redisClient)
+	tripLifecycleRepo := fleetrepo.NewTripLifecycleRepository(pool)
 	outboxRepo := bookingrepo.NewOutboxRepository(pool)
 
 	// Phase 4: Wire finance repositories and journal service
@@ -71,6 +77,11 @@ func main() {
 	// Idempotent blanket sweep every 20s, safe to call from multiple replicas
 	cleanupTicker := time.NewTicker(20 * time.Second)
 	defer cleanupTicker.Stop()
+
+	// Trip completion: scheduled trips whose arrival has passed become
+	// 'completed'. Idempotent set-based UPDATE, safe across replicas.
+	tripCompletionTicker := time.NewTicker(5 * time.Minute)
+	defer tripCompletionTicker.Stop()
 
 	// Phase 3: outbox relay ticker
 	// Poll outbox_events table and relay events to Phase 4/5 handlers (console stub for now)
@@ -95,8 +106,6 @@ func main() {
 	if smsErr != nil {
 		logger.Warn("sms balance monitor disabled", "error", smsErr)
 	}
-	redisClient := redis.NewClient(&redis.Options{Addr: getenv("REDIS_ADDR", "localhost:6379")})
-	defer func() { _ = redisClient.Close() }()
 	smsBalance := sms.NewBalanceService(smsClient, redisClient)
 	smsPolicy := sms.BalancePolicyFromEnv()
 	smsBalanceTicker := time.NewTicker(30 * time.Minute)
@@ -132,6 +141,14 @@ func main() {
 				logger.Error("seat-hold cleanup failed", "error", err)
 			} else if releasedCount > 0 {
 				logger.Info("seat-hold cleanup swept", "released_count", releasedCount)
+			}
+
+		case <-tripCompletionTicker.C:
+			n, err := tripLifecycleRepo.CompleteArrivedTrips(ctx)
+			if err != nil {
+				logger.Error("trip completion failed", "error", err)
+			} else if n > 0 {
+				logger.Info("trips completed", "count", n)
 			}
 
 		case <-smsBalanceTicker.C:

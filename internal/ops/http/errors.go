@@ -24,6 +24,18 @@ func writeDomainError(w http.ResponseWriter, err error) {
 			Message: "Please check the highlighted fields.",
 			Fields:  []httpx.FieldError{{Field: "password", Issue: "Must be at least 10 characters."}},
 		}, nil)
+	case service.ErrRegistrationDocTooLarge:
+		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.APIError{
+			Code:    "VALIDATION_FAILED",
+			Message: "Please check the highlighted fields.",
+			Fields:  []httpx.FieldError{{Field: "registrationDocUrl", Issue: "Document is too large."}},
+		}, nil)
+	case service.ErrRegistrationDocInvalid:
+		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.APIError{
+			Code:    "VALIDATION_FAILED",
+			Message: "Please check the highlighted fields.",
+			Fields:  []httpx.FieldError{{Field: "registrationDocUrl", Issue: "Must be an https URL or a PNG, JPEG or WebP image."}},
+		}, nil)
 	default:
 		httpx.WriteError(w, http.StatusInternalServerError, httpx.APIError{Code: "PLATFORM_INTERNAL_ERROR", Message: "Something went wrong. Please try again."}, nil)
 	}

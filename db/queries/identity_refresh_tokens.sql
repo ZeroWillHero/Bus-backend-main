@@ -6,7 +6,7 @@ RETURNING *;
 -- name: GetRefreshTokenByHash :one
 SELECT * FROM identity.refresh_tokens WHERE token_hash = $1;
 
--- name: RevokeRefreshToken :exec
+-- name: RevokeRefreshToken :execrows
 UPDATE identity.refresh_tokens
 SET revoked_at = now()
 WHERE id = $1 AND revoked_at IS NULL;
@@ -15,6 +15,12 @@ WHERE id = $1 AND revoked_at IS NULL;
 UPDATE identity.refresh_tokens
 SET revoked_at = now()
 WHERE user_id = $1 AND revoked_at IS NULL;
+
+-- name: RevokeAllRefreshTokensForOperator :exec
+UPDATE identity.refresh_tokens rt
+SET revoked_at = now()
+FROM identity.users u
+WHERE rt.user_id = u.id AND u.operator_id = $1 AND rt.revoked_at IS NULL;
 
 -- name: ListActiveRefreshTokensForUser :many
 SELECT * FROM identity.refresh_tokens
